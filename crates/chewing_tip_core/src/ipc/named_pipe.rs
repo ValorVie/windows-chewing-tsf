@@ -1,10 +1,5 @@
 use std::{
-    ffi::OsStr,
-    hash::Hasher,
-    iter::once,
-    os::windows::ffi::OsStrExt,
-    path::{Path, PathBuf},
-    time::Duration,
+    ffi::OsStr, hash::Hasher, iter::once, os::windows::ffi::OsStrExt, path::Path, time::Duration,
 };
 
 use fnv::FnvHasher;
@@ -12,28 +7,23 @@ use interprocess::os::windows::{
     named_pipe::{DuplexPipeStream, PipeListener, PipeListenerOptions, PipeMode, pipe_mode::Bytes},
     security_descriptor::SecurityDescriptor,
 };
-use log::{debug, error, info};
-use scoped_error::{ErrorExt, Many, expect_error};
+use log::{debug, info};
+use scoped_error::expect_error;
 use widestring::U16CString;
 use windows::{
     Win32::{
-        Foundation::{CloseHandle, HWND, INVALID_HANDLE_VALUE, MAX_PATH, S_OK},
+        Foundation::{HWND, INVALID_HANDLE_VALUE, S_OK},
         Security::WinTrust::{
             WINTRUST_ACTION_GENERIC_VERIFY_V2, WINTRUST_DATA, WINTRUST_DATA_0, WINTRUST_FILE_INFO,
             WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_WHOLECHAIN,
             WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE, WinVerifyTrust,
         },
-        System::{
-            Pipes::WaitNamedPipeW,
-            Threading::{
-                OpenProcess, PROCESS_NAME_FORMAT, PROCESS_QUERY_LIMITED_INFORMATION,
-                QueryFullProcessImageNameW,
-            },
-        },
+        System::Pipes::WaitNamedPipeW,
     },
-    core::{HSTRING, PCWSTR, PWSTR},
+    core::{HSTRING, PCWSTR},
 };
 
+use super::server_trust::attest_server;
 use crate::ipc::IpcError;
 use crate::sandbox::get_user_cred;
 
@@ -87,7 +77,7 @@ pub fn create_pipe_listener() -> Result<PipeListener<Bytes, Bytes>, IpcError> {
 }
 
 /// Connects to the well-known windows-chewing-tsf named pipe and validate the
-/// server executable is signed with a trusted key.
+/// server executable is signed or matches the protected TIP installation.
 pub fn connect_and_attest(
     pipe_path: &str,
     timeout: Duration,
@@ -100,45 +90,9 @@ pub fn connect_and_attest(
         let pipe = DuplexPipeStream::connect_by_path(pipe_path)?;
 
         let peer_pid = pipe.server_process_id()?;
-        if let Err(error) = attest_server(peer_pid) {
-            if cfg!(debug_assertions) {
-                error!("failed to validate signature: {}", error.report());
-            } else {
-                Err(error)?;
-            }
-        }
+        attest_server(peer_pid)?;
 
         Ok(pipe)
-    })
-}
-
-fn attest_server(pid: u32) -> Result<(), IpcError> {
-    expect_error("Failed to attest server executible", || {
-        let exe_path = unsafe {
-            let mut buffer = [0u16; MAX_PATH as usize];
-            let mut size = MAX_PATH;
-            let pwpath = PWSTR::from_raw(buffer.as_mut_ptr());
-            let handle = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid)?;
-            if let Err(error) =
-                QueryFullProcessImageNameW(handle, PROCESS_NAME_FORMAT(0), pwpath, &mut size)
-            {
-                let mut errors = vec![error];
-                if let Err(e) = CloseHandle(handle) {
-                    errors.push(e);
-                }
-                Err(Many::from_errors("Failed to close process handle", errors))?;
-            }
-            PathBuf::from(pwpath.to_string()?)
-        };
-
-        if !verify_trust(&exe_path) {
-            Err(format!(
-                "unable to verify the signature of {}",
-                exe_path.display()
-            ))?;
-        }
-
-        Ok(())
     })
 }
 
