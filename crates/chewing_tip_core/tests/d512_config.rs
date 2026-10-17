@@ -415,3 +415,64 @@ fn d512_saved_values_survive_default_changes() {
         }
     }
 }
+
+fn assert_log_calibration(cfg: &Config, expected: i32) {
+    let value = serde_json::to_value(&cfg.chewing_tsf).unwrap();
+    assert_eq!(value["d512_log_calibration"], json!(expected));
+}
+
+#[test]
+fn d512_log_calibration_defaults_to_off() {
+    assert_log_calibration(&Config::default(), 0);
+}
+
+#[test]
+fn d512_log_calibration_older_json_defaults_to_off() {
+    let mut value = serde_json::to_value(Config::default()).unwrap();
+    value["chewing_tsf"]
+        .as_object_mut()
+        .unwrap()
+        .remove("d512_log_calibration");
+    assert_log_calibration(&serde_json::from_value(value).unwrap(), 0);
+}
+
+#[test]
+fn d512_log_calibration_missing_registry_value_uses_and_saves_default() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    let cfg = Config::from_reg().unwrap();
+    assert_log_calibration(&cfg, 0);
+    assert!(key.get_u32("D512LogCalibration").is_err());
+    cfg.save_reg();
+    assert_eq!(key.get_u32("D512LogCalibration").unwrap(), 0);
+}
+
+#[test]
+fn d512_log_calibration_preserves_dword_choices_and_bits() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for stored in [0, 1, 2, 42, i32::MAX as u32, 0x8000_0000, u32::MAX] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["d512_log_calibration"] = json!(stored as i32);
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        cfg.save_reg();
+        assert_eq!(key.get_u32("D512LogCalibration").unwrap(), stored);
+        let mut loaded = Config::from_reg().unwrap();
+        assert_log_calibration(&loaded, stored as i32);
+        loaded.chewing_tsf.font_size = 19;
+        loaded.save_reg();
+        assert_eq!(key.get_u32("D512LogCalibration").unwrap(), stored);
+    }
+}
+
+#[test]
+fn d512_log_calibration_wrong_registry_type_uses_default_without_writing() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_string("D512LogCalibration", "1").unwrap();
+    assert_log_calibration(&Config::from_reg().unwrap(), 0);
+    assert_eq!(key.get_string("D512LogCalibration").unwrap(), "1");
+}

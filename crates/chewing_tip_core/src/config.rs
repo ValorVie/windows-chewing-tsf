@@ -74,6 +74,8 @@ pub struct ChewingTsfConfig {
     pub d512_mode: i32,
     #[serde(default)]
     pub d512_suggestion_accept_key: i32,
+    #[serde(default)]
+    pub d512_log_calibration: i32,
     #[serde(default = "default_d512_weight")]
     pub d512_weight: f64,
     #[serde(default = "default_d512_margin")]
@@ -152,6 +154,7 @@ impl Default for ChewingTsfConfig {
             conv_engine: 1,
             d512_mode: default_d512_mode(),
             d512_suggestion_accept_key: 0,
+            d512_log_calibration: 0,
             d512_weight: default_d512_weight(),
             d512_margin: default_d512_margin(),
             d512_suggest_weight: default_d512_suggest_weight(),
@@ -349,6 +352,9 @@ impl Config {
             if let Ok(value) = reg_get_i32(&key, "D512SuggestionAcceptKey") {
                 cfg.d512_suggestion_accept_key = value;
             }
+            if let Ok(value) = reg_get_i32(&key, "D512LogCalibration") {
+                cfg.d512_log_calibration = value;
+            }
             if let Ok(value) = reg_get_f64(&key, "D512Weight") {
                 cfg.d512_weight = value;
             }
@@ -512,6 +518,7 @@ impl Config {
             "D512SuggestionAcceptKey",
             chewing_tsf.d512_suggestion_accept_key,
         );
+        let _ = reg_set_i32(&key, "D512LogCalibration", chewing_tsf.d512_log_calibration);
         let _ = key.set_string("D512Weight", chewing_tsf.d512_weight.to_string());
         let _ = key.set_string("D512Margin", chewing_tsf.d512_margin.to_string());
         let _ = key.set_string(

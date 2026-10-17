@@ -28,6 +28,10 @@ defaults, remain unchanged when loaded or saved with unrelated settings.
 The margins follow the Mac presets by product decision; they are not the
 libchewing calibration points. Weight is 0.25 for all six presets.
 
+`D512LogCalibration` is a DWORD (0 off by default, 1 on), stored unchanged in
+`ChewingTsfConfig::d512_log_calibration`. This version provides the configuration
+field only; it does not write calibration records.
+
 `D512SuggestionAcceptKey` is a DWORD: 0 Tab (default), 1 Ctrl+Tab, 2 Right at
 composition end. In normal Chinese composition without unfinished Zhuyin,
 Tab/Ctrl+Tab in their configured mode consume the gesture even without a valid
