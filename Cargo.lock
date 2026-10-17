@@ -293,6 +293,7 @@ checksum = "4e7648175b45a9a48536d676f68d918270699102aa8dab5496df06904c914600"
 [[package]]
 name = "chewing"
 version = "0.14.0-alpha.4"
+source = "git+https://github.com/ValorVie/libchewing.git?branch=valor-feature#3e69d8bcf85b874b81a530eb68679b7d01e9db65"
 dependencies = [
  "bstr",
  "der",

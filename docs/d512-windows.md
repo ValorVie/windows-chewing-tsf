@@ -122,9 +122,13 @@ x86 file `chewing_tip_x86.dll`. COM registry entries retain their respective
 
 ## Prepare the installer
 
-Use the libchewing checkout specified by the integration contract at
-`../libchewing`; its `docs/d512.md` defines the scorer API. Supply these immutable
-assets in one directory:
+Cargo fetches [libchewing](https://github.com/ValorVie/libchewing/tree/valor-feature)
+from the `valor-feature` branch. `Cargo.lock` pins the exact engine revision;
+use `cargo build --locked` to keep that revision. The engine's `docs/d512.md`
+defines the scorer API. To edit both repositories locally, comment out the git
+entry under `[patch."crates-io"]` in `Cargo.toml` and uncomment the adjacent
+`chewing = { path = "../libchewing/" }` entry. Restore the git entry and lockfile
+before committing. Supply these immutable assets in one directory:
 
 - `model.onnx`, `vocab.json`, `manifest.json` and `D512-LICENSE.txt` from the MIT
   [d512-pf512-20260926 checkpoint](https://huggingface.co/Funmula/0c-sequence-d512/tree/d512-pf512-20260926).

@@ -27,4 +27,5 @@ lto = true
 panic = "abort"
 
 [patch."crates-io"]
-chewing = { path = "../libchewing/" }
+chewing = { git = "https://github.com/ValorVie/libchewing.git", branch = "valor-feature" }
+# chewing = { path = "../libchewing/" }
