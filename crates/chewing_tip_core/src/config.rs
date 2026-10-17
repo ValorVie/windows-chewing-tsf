@@ -173,6 +173,17 @@ impl Default for ChewingTsfConfig {
     }
 }
 
+impl ChewingTsfConfig {
+    /// Resolves the runtime mode without changing the saved user choice.
+    /// Suggestion mode temporarily uses automatic reranking.
+    pub fn effective_d512_mode(&self) -> i32 {
+        match self.d512_mode {
+            0 => 0,
+            _ => default_d512_mode(),
+        }
+    }
+}
+
 impl Config {
     pub fn grant_sandbox_access(&self) {
         // AppContainer app, like the SearchHost.exe powering the start menu search bar
@@ -305,9 +316,7 @@ impl Config {
             }
             if let Ok(value) = reg_get_i32(&key, "D512Mode") {
                 cfg.d512_mode = match value {
-                    0 => 0,
-                    // Suggestion-only behavior is not yet implemented.
-                    1 | 2 => 1,
+                    0..=2 => value,
                     _ => default_d512_mode(),
                 };
             }
@@ -702,14 +711,14 @@ fn reg_get_i32(hk: &Key, value_name: &str) -> Result<i32, ConfigError> {
 
 fn reg_get_f64(hk: &Key, value_name: &str) -> Result<f64, ConfigError> {
     let err = || ConfigError {
-        message: format!("Failed to read config {value_name} as finite f64").into(),
+        message: format!("Failed to read config {value_name} as nonnegative finite f64").into(),
         source: None,
         location: None,
     };
     expect_error_fn(err, || {
         let value: f64 = hk.get_string(value_name)?.parse()?;
-        if !value.is_finite() {
-            return Err("expected a finite decimal value".into());
+        if !value.is_finite() || value < 0.0 {
+            return Err("expected a nonnegative finite decimal value".into());
         }
         Ok(value)
     })

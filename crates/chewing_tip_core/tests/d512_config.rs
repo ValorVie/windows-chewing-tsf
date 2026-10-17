@@ -89,16 +89,16 @@ fn d512_missing_registry_values_use_and_save_defaults() {
 }
 
 #[test]
-fn d512_modes_include_phase_one_suggestion_fallback() {
+fn d512_registry_modes_preserve_user_choice() {
     let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry = IsolatedRegistry::new();
     let key = registry.settings();
     key.set_string("D512Weight", "0.5").unwrap();
     key.set_string("D512Margin", "0.125").unwrap();
 
-    for (stored, effective) in [(0, 0), (1, 1), (2, 1), (3, 1), (u32::MAX, 1)] {
+    for (stored, loaded) in [(0, 0), (1, 1), (2, 2), (3, 1), (u32::MAX, 1)] {
         key.set_u32("D512Mode", stored).unwrap();
-        assert_settings(&Config::from_reg().unwrap(), effective, 0.5, 0.125);
+        assert_settings(&Config::from_reg().unwrap(), loaded, 0.5, 0.125);
     }
 }
 
@@ -108,7 +108,7 @@ fn d512_save_uses_dword_mode_and_decimal_strings() {
     let registry = IsolatedRegistry::new();
     let key = registry.settings();
 
-    for (stored, effective) in [(0, 0), (1, 1), (2, 1)] {
+    for stored in [0, 1, 2] {
         let mut value = serde_json::to_value(Config::default()).unwrap();
         value["chewing_tsf"]["d512_mode"] = json!(stored);
         value["chewing_tsf"]["d512_weight"] = json!(0.75);
@@ -119,7 +119,7 @@ fn d512_save_uses_dword_mode_and_decimal_strings() {
         assert_eq!(key.get_u32("D512Mode").unwrap(), stored);
         assert_eq!(key.get_string("D512Weight").unwrap(), "0.75");
         assert_eq!(key.get_string("D512Margin").unwrap(), "0.125");
-        assert_settings(&Config::from_reg().unwrap(), effective, 0.75, 0.125);
+        assert_settings(&Config::from_reg().unwrap(), stored as i32, 0.75, 0.125);
     }
 }
 
@@ -130,7 +130,7 @@ fn d512_invalid_values_fall_back_independently() {
     let key = registry.settings();
     key.set_u32("D512Mode", 0).unwrap();
 
-    for invalid in ["", "invalid", "NaN", "inf", "-inf", "1e999"] {
+    for invalid in ["", "invalid", "NaN", "inf", "-inf", "1e999", "-0.01", "-1"] {
         key.set_string("D512Weight", invalid).unwrap();
         key.set_string("D512Margin", "0.375").unwrap();
         assert_settings(&Config::from_reg().unwrap(), 0, 0.25, 0.375);
@@ -144,6 +144,41 @@ fn d512_invalid_values_fall_back_independently() {
     key.set_u32("D512Weight", 1).unwrap();
     key.set_u64("D512Margin", 1).unwrap();
     assert_settings(&Config::from_reg().unwrap(), 1, 0.25, 0.25);
+}
+
+#[test]
+fn d512_suggestion_choice_survives_unrelated_config_save() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_u32("D512Mode", 2).unwrap();
+
+    let mut cfg = Config::from_reg().unwrap();
+    cfg.chewing_tsf.font_size = 18;
+    cfg.save_reg();
+
+    assert_eq!(key.get_u32("D512Mode").unwrap(), 2);
+    assert_settings(&Config::from_reg().unwrap(), 2, 0.25, 0.25);
+}
+
+#[test]
+fn d512_zero_weight_and_margin_are_valid() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_string("D512Weight", "0").unwrap();
+    key.set_string("D512Margin", "0").unwrap();
+    assert_settings(&Config::from_reg().unwrap(), 1, 0.0, 0.0);
+}
+
+#[test]
+fn d512_effective_mode_does_not_rewrite_user_choice() {
+    let mut cfg = Config::default();
+    for (stored, effective) in [(0, 0), (1, 1), (2, 1), (3, 1), (-1, 1)] {
+        cfg.chewing_tsf.d512_mode = stored;
+        assert_eq!(cfg.chewing_tsf.effective_d512_mode(), effective);
+        assert_eq!(cfg.chewing_tsf.d512_mode, stored);
+    }
 }
 
 #[test]
