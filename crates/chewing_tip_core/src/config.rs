@@ -67,6 +67,12 @@ pub struct ChewingTsfConfig {
     pub output_simp_chinese: bool,
     pub sel_key_type: i32,
     pub conv_engine: i32,
+    #[serde(default = "default_d512_mode")]
+    pub d512_mode: i32,
+    #[serde(default = "default_d512_weight")]
+    pub d512_weight: f64,
+    #[serde(default = "default_d512_margin")]
+    pub d512_margin: f64,
     pub cand_per_row: i32,
     pub cand_per_page: i32,
     pub font_size: i32,
@@ -88,6 +94,18 @@ pub struct ChewingTsfConfig {
     pub update_info_url: String,
     pub last_update_check_time: u64,
     pub modified_timestamp: u64,
+}
+
+fn default_d512_mode() -> i32 {
+    1
+}
+
+fn default_d512_weight() -> f64 {
+    0.25
+}
+
+fn default_d512_margin() -> f64 {
+    0.25
 }
 
 impl Default for ChewingTsfConfig {
@@ -116,6 +134,9 @@ impl Default for ChewingTsfConfig {
             output_simp_chinese: false,
             sel_key_type: 0,
             conv_engine: 1,
+            d512_mode: default_d512_mode(),
+            d512_weight: default_d512_weight(),
+            d512_margin: default_d512_margin(),
             cand_per_row: 3,
             cand_per_page: 9,
             font_size: 16,
@@ -282,6 +303,20 @@ impl Config {
             if let Ok(value) = reg_get_i32(&key, "ConvEngine") {
                 cfg.conv_engine = value;
             }
+            if let Ok(value) = reg_get_i32(&key, "D512Mode") {
+                cfg.d512_mode = match value {
+                    0 => 0,
+                    // Suggestion-only behavior is not yet implemented.
+                    1 | 2 => 1,
+                    _ => default_d512_mode(),
+                };
+            }
+            if let Ok(value) = reg_get_f64(&key, "D512Weight") {
+                cfg.d512_weight = value;
+            }
+            if let Ok(value) = reg_get_f64(&key, "D512Margin") {
+                cfg.d512_margin = value;
+            }
             if let Ok(value) = reg_get_i32(&key, "SelAreaLen") {
                 cfg.cand_per_page = value;
             }
@@ -427,6 +462,9 @@ impl Config {
         let _ = key.set_string("DefNotifyBorderColor", &chewing_tsf.notify_border_color);
         let _ = reg_set_i32(&key, "SelKeyType", chewing_tsf.sel_key_type);
         let _ = reg_set_i32(&key, "ConvEngine", chewing_tsf.conv_engine);
+        let _ = reg_set_i32(&key, "D512Mode", chewing_tsf.d512_mode);
+        let _ = key.set_string("D512Weight", chewing_tsf.d512_weight.to_string());
+        let _ = key.set_string("D512Margin", chewing_tsf.d512_margin.to_string());
         let _ = reg_set_i32(&key, "SelAreaLen", chewing_tsf.cand_per_page);
         let _ = reg_set_bool(&key, "CursorCandList", chewing_tsf.cursor_cand_list);
         let _ = reg_set_bool(
@@ -660,6 +698,21 @@ fn reg_get_i32(hk: &Key, value_name: &str) -> Result<i32, ConfigError> {
         location: None,
     };
     expect_error_fn(err, || Ok(hk.get_u32(value_name).map(|v| v as i32)?))
+}
+
+fn reg_get_f64(hk: &Key, value_name: &str) -> Result<f64, ConfigError> {
+    let err = || ConfigError {
+        message: format!("Failed to read config {value_name} as finite f64").into(),
+        source: None,
+        location: None,
+    };
+    expect_error_fn(err, || {
+        let value: f64 = hk.get_string(value_name)?.parse()?;
+        if !value.is_finite() {
+            return Err("expected a finite decimal value".into());
+        }
+        Ok(value)
+    })
 }
 
 fn reg_get_bool(hk: &Key, value_name: &str) -> Result<bool, ConfigError> {
