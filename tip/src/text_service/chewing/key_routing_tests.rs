@@ -67,11 +67,13 @@ macro_rules! unsupported {
     ITfCompositionSink,
     ITfThreadMgr,
     ITfUIElementMgr,
-    ITfDocumentMgr
+    ITfDocumentMgr,
+    ITfInsertAtSelection
 )]
 struct Tsf {
     readonly: Cell<bool>,
     edits: Cell<u32>,
+    document: Rc<Document>,
 }
 
 #[allow(unused_variables)]
@@ -128,12 +130,25 @@ impl ITfCompartmentMgr_Impl for Tsf_Impl {
 
 #[allow(unused_variables)]
 impl ITfComposition_Impl for Tsf_Impl {
+    fn GetRange(&self) -> windows_core::Result<ITfRange> {
+        Ok(Range {
+            document: self.document.clone(),
+        }
+        .into_object()
+        .into_interface())
+    }
+    fn ShiftStart(
+        &self,
+        _ecwrite: u32,
+        _range: windows_core::Ref<ITfRange>,
+    ) -> windows_core::Result<()> {
+        self.document.committed.set(true);
+        Ok(())
+    }
     fn EndComposition(&self, ecwrite: u32) -> windows_core::Result<()> {
         Ok(())
     }
     unsupported! {
-        fn GetRange(&self) -> windows_core::Result<ITfRange>;
-        fn ShiftStart(&self, ecwrite: u32, pnewstart: windows_core::Ref<ITfRange>) -> windows_core::Result<()>;
         fn ShiftEnd(&self, ecwrite: u32, pnewend: windows_core::Ref<ITfRange>) -> windows_core::Result<()>;
     }
 }
@@ -209,6 +224,100 @@ impl ITfDocumentMgr_Impl for Tsf_Impl {
     }
 }
 
+// Only the external document boundary is synthetic. These cases execute the
+// production edit sessions and inject failures after/before real mock writes.
+#[derive(Default)]
+struct Document {
+    text: RefCell<String>,
+    fail_write: Cell<bool>,
+    committed: Cell<bool>,
+    shifted: Cell<i32>,
+}
+#[implement(ITfRange)]
+struct Range {
+    document: Rc<Document>,
+}
+impl ITfRange_Impl for Range_Impl {
+    fn SetText(
+        &self,
+        _ec: u32,
+        _flags: u32,
+        text: &windows_core::PCWSTR,
+        len: i32,
+    ) -> windows_core::Result<()> {
+        if self.document.fail_write.get() {
+            return Err(E_FAIL.into());
+        }
+        self.document.text.replace(
+            String::from_utf16(unsafe { std::slice::from_raw_parts(text.0, len as usize) })
+                .unwrap(),
+        );
+        Ok(())
+    }
+    fn ShiftStart(
+        &self,
+        _ec: u32,
+        count: i32,
+        moved: *mut i32,
+        _halt: *const TF_HALTCOND,
+    ) -> windows_core::Result<()> {
+        self.document.shifted.set(count);
+        unsafe {
+            *moved = count;
+        }
+        Ok(())
+    }
+    fn Collapse(&self, _ec: u32, _anchor: TfAnchor) -> windows_core::Result<()> {
+        Err(E_FAIL.into())
+    }
+    unsupported! {
+    fn GetText(&self, ec: u32, dwflags: u32, pchtext: windows_core::PWSTR, cchmax: u32, pcch: *mut u32) -> windows_core::Result<()>;
+    fn GetFormattedText(&self, ec: u32) -> windows_core::Result<windows::Win32::System::Com::IDataObject>;
+    fn GetEmbedded(&self, ec: u32, rguidservice: *const windows_core::GUID, riid: *const windows_core::GUID) -> windows_core::Result<windows_core::IUnknown>;
+    fn InsertEmbedded(&self, ec: u32, dwflags: u32, pdataobject: windows_core::Ref<windows::Win32::System::Com::IDataObject>) -> windows_core::Result<()>;
+    fn ShiftEnd(&self, ec: u32, cchreq: i32, pcch: *mut i32, phalt: *const TF_HALTCOND) -> windows_core::Result<()>;
+    fn ShiftStartToRange(&self, ec: u32, prange: windows_core::Ref<ITfRange>, apos: TfAnchor) -> windows_core::Result<()>;
+    fn ShiftEndToRange(&self, ec: u32, prange: windows_core::Ref<ITfRange>, apos: TfAnchor) -> windows_core::Result<()>;
+    fn ShiftStartRegion(&self, ec: u32, dir: TfShiftDir) -> windows_core::Result<windows_core::BOOL>;
+    fn ShiftEndRegion(&self, ec: u32, dir: TfShiftDir) -> windows_core::Result<windows_core::BOOL>;
+    fn IsEmpty(&self, ec: u32) -> windows_core::Result<windows_core::BOOL>;
+    fn IsEqualStart(&self, ec: u32, pwith: windows_core::Ref<ITfRange>, apos: TfAnchor) -> windows_core::Result<windows_core::BOOL>;
+    fn IsEqualEnd(&self, ec: u32, pwith: windows_core::Ref<ITfRange>, apos: TfAnchor) -> windows_core::Result<windows_core::BOOL>;
+    fn CompareStart(&self, ec: u32, pwith: windows_core::Ref<ITfRange>, apos: TfAnchor) -> windows_core::Result<i32>;
+    fn CompareEnd(&self, ec: u32, pwith: windows_core::Ref<ITfRange>, apos: TfAnchor) -> windows_core::Result<i32>;
+    fn AdjustForInsert(&self, ec: u32, cchinsert: u32) -> windows_core::Result<windows_core::BOOL>;
+    fn GetGravity(&self, pgstart: *mut TfGravity, pgend: *mut TfGravity) -> windows_core::Result<()>;
+    fn SetGravity(&self, ec: u32, gstart: TfGravity, gend: TfGravity) -> windows_core::Result<()>;
+    fn Clone(&self) -> windows_core::Result<ITfRange>;
+    fn GetContext(&self) -> windows_core::Result<ITfContext>;
+    }
+}
+impl ITfInsertAtSelection_Impl for Tsf_Impl {
+    fn InsertTextAtSelection(
+        &self,
+        _ec: u32,
+        _flags: INSERT_TEXT_AT_SELECTION_FLAGS,
+        text: &windows_core::PCWSTR,
+        len: i32,
+    ) -> windows_core::Result<ITfRange> {
+        if self.document.fail_write.get() {
+            return Err(E_FAIL.into());
+        }
+        self.document.text.replace(
+            String::from_utf16(unsafe { std::slice::from_raw_parts(text.0, len as usize) })
+                .unwrap(),
+        );
+        Ok(Range {
+            document: self.document.clone(),
+        }
+        .into_object()
+        .into_interface())
+    }
+    unsupported! {
+        fn InsertEmbeddedAtSelection(&self, ec:u32, flags:u32, object:windows_core::Ref<windows::Win32::System::Com::IDataObject>)->windows_core::Result<ITfRange>;
+    }
+}
+
 struct Scores(Arc<AtomicUsize>);
 impl SentenceScorer for Scores {
     fn score(
@@ -228,6 +337,7 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
     let tsf = Tsf {
         readonly: Cell::new(false),
         edits: Cell::new(0),
+        document: Rc::new(Document::default()),
     }
     .into_object();
     let thread: ITfThreadMgr = tsf.cast().unwrap();
@@ -309,6 +419,7 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
         keymap: KeymapOp::None,
         keybindings: vec![],
         chewing_editor: editor,
+        calibration: Rc::new(super::super::d512_calibration::Collector::new()),
         d512_hint: Rc::new(super::super::d512_ui::HintSlot::new(Rc::new(Cell::new(0)))),
         d512_confirmed: "前文".into(),
         notification: None,
@@ -536,4 +647,174 @@ fn accepted_preedit_entry_does_not_rescore() {
     );
     assert_eq!(service.chewing_editor.display_commit(), "");
     assert_eq!(calls.load(Ordering::SeqCst), before);
+}
+
+fn calibration_fixture() -> (
+    ChewingTextService,
+    ComObject<Tsf>,
+    Rc<RefCell<Vec<chewing_tip_core::ipc::d512::calibration::CalibrationRecord>>>,
+) {
+    let (mut s, t, calls) = fixture(2, 0);
+    let rows = Rc::new(RefCell::new(vec![]));
+    let output = rows.clone();
+    s.calibration = Rc::new(super::super::d512_calibration::Collector::with_sink(
+        move |records| {
+            output.borrow_mut().extend(records);
+            true
+        },
+    ));
+    s.cfg.chewing_tsf.d512_log_calibration = 1;
+    s.cfg.save_reg();
+    s.cfg = Config::from_reg().unwrap();
+    s.calibration.configure(&s.cfg.chewing_tsf);
+    s.chewing_editor
+        .set_sentence_scorer(
+            Some(s.calibration.track(Box::new(Scores(calls)))),
+            D512Options {
+                mode: D512Mode::Suggestion,
+                weight: 0.25,
+                margin: 2.,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    (s, t, rows)
+}
+#[test]
+fn calibration_entry_redraw_then_escape_finishes_with_cancel() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, rows) = calibration_fixture();
+    let ctx = t.cast().unwrap();
+    s.chewing_editor
+        .set_editor_options(|o| o.esc_clear_all_buffer = true);
+    s.update_preedit(&ctx, String::new()).unwrap();
+    assert_eq!(rows.borrow().len(), 1);
+    assert_eq!(rows.borrow()[0].phase, "rerank");
+    assert!(s.on_keydown(&ctx, event(VK_ESCAPE.0, 1, 0, 0)).unwrap());
+    let r = rows.borrow();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0].id, r[1].id);
+    assert_eq!(r[1].phase, "cancel");
+    assert!(r[1].final_committed_text.is_none());
+}
+#[test]
+fn calibration_entry_leaving_focus_cancels_pending_receipts() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, rows) = calibration_fixture();
+    s.update_preedit(&t.cast().unwrap(), String::new()).unwrap();
+    assert_eq!(rows.borrow().len(), 1);
+    s.on_kill_focus(None).unwrap();
+    let r = rows.borrow();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[1].phase, "cancel");
+    assert_eq!(r[0].id, r[1].id);
+}
+
+#[test]
+fn calibration_focus_invalidation_survives_reentrant_service_borrow() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, rows) = calibration_fixture();
+    s.update_preedit(&t.cast().unwrap(), String::new()).unwrap();
+    assert_eq!(rows.borrow().len(), 1);
+    let outer = TextService::new();
+    outer.calibration.replace(Rc::downgrade(&s.calibration));
+    let _borrow = outer.inner.borrow_mut();
+    outer.invalidate_d512_hint();
+    assert_eq!(rows.borrow().len(), 2);
+    assert_eq!(rows.borrow()[1].phase, "cancel");
+}
+
+#[test]
+fn calibration_insert_receipt_tracks_text_write_even_when_selection_fails() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for fail in [false, true] {
+        let (mut s, t, rows) = calibration_fixture();
+        s.update_preedit(&t.cast().unwrap(), String::new()).unwrap();
+        t.document.fail_write.set(fail);
+        let receipt = s.calibration.take_commit();
+        let session: ITfEditSession = InsertText::new(
+            t.cast().unwrap(),
+            HSTRING::from("合成🧪"),
+            Rc::new(move || receipt.confirm("合成🧪")),
+        )
+        .into_object()
+        .into_interface();
+        assert!(unsafe { session.DoEditSession(0) }.is_err());
+        drop(session);
+        let r = rows.borrow();
+        assert_eq!(r.len(), 2);
+        assert_eq!(
+            t.document.text.borrow().as_str(),
+            if fail { "" } else { "合成🧪" }
+        );
+        assert_eq!(r[1].phase, if fail { "cancel" } else { "commit" });
+        assert_eq!(
+            r[1].final_committed_text.as_deref(),
+            if fail { None } else { Some("合成🧪") }
+        );
+    }
+}
+#[test]
+fn calibration_prefix_receipt_tracks_commit_even_when_property_lookup_fails() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for fail in [false, true] {
+        let (mut s, t, rows) = calibration_fixture();
+        s.update_preedit(&t.cast().unwrap(), String::new()).unwrap();
+        t.document.fail_write.set(fail);
+        let receipt = s.calibration.take_commit();
+        let pending = Rc::new(RefCell::new(Some(CompositionString {
+            commit: "合成🧪".into(),
+            preedit: String::new(),
+            segments: vec![],
+            cursor: 0,
+            on_committed: Some(Rc::new(move || receipt.confirm("合成🧪"))),
+            on_applied: None,
+        })));
+        let session: ITfEditSession = SetCompositionString::new(
+            t.cast().unwrap(),
+            s.composition.clone(),
+            t.cast().unwrap(),
+            [VARIANT::default(), VARIANT::default()],
+            pending.clone(),
+        )
+        .into_object()
+        .into_interface();
+        assert!(unsafe { session.DoEditSession(0) }.is_err());
+        drop(session);
+        drop(pending);
+        let r = rows.borrow();
+        assert_eq!(r.len(), 2);
+        assert_eq!(t.document.committed.get(), !fail);
+        if !fail {
+            assert_eq!(t.document.shifted.get(), 4);
+        }
+        assert_eq!(r[1].phase, if fail { "cancel" } else { "commit" });
+        assert_eq!(
+            r[1].final_committed_text.as_deref(),
+            if fail { None } else { Some("合成🧪") }
+        );
+    }
+}
+#[test]
+fn calibration_enter_captures_preedit_before_editor_and_ignores_hidden_rescore() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, rows) = calibration_fixture();
+    let _ = s.chewing_editor.display(); // completed preedit evaluation, not yet collected
+    assert!(rows.borrow().is_empty());
+    assert!(
+        s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+            .unwrap()
+    );
+    let r = rows.borrow();
+    assert_eq!(r.len(), 2);
+    assert_eq!(r[0].phase, "rerank");
+    // This context denies the document write. Only the saved preedit ID ends.
+    assert_eq!(r[1].phase, "cancel");
+    assert_eq!(r[0].id, r[1].id);
 }

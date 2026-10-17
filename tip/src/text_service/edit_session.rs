@@ -58,11 +58,16 @@ fn set_selection(
 pub(super) struct InsertText {
     context: ITfContext,
     text: HSTRING,
+    on_inserted: Rc<dyn Fn()>,
 }
 
 impl InsertText {
-    pub(super) fn new(context: ITfContext, text: HSTRING) -> InsertText {
-        Self { context, text }
+    pub(super) fn new(context: ITfContext, text: HSTRING, on_inserted: Rc<dyn Fn()>) -> InsertText {
+        Self {
+            context,
+            text,
+            on_inserted,
+        }
     }
 }
 
@@ -75,6 +80,8 @@ impl ITfEditSession_Impl for InsertText_Impl {
                 INSERT_TEXT_AT_SELECTION_FLAGS(0),
                 &self.text,
             )?;
+            // Insertion has succeeded even if later selection maintenance fails.
+            (self.on_inserted)();
             range.Collapse(ec, TF_ANCHOR_END)?;
             set_selection(&self.context, ec, range, TF_AE_END)?;
         }
@@ -112,84 +119,97 @@ impl SetCompositionString {
 impl ITfEditSession_Impl for SetCompositionString_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
         let mut applied = None;
-        unsafe {
-            if self.composition.borrow().is_none() && self.pending.borrow().is_some() {
-                debug!("starting a new composition");
-                let context_composition: ITfContextComposition = self.context.cast()?;
-                let insert_at_selection: ITfInsertAtSelection = self.context.cast()?;
-                let range = insert_at_selection.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])?;
-                // XXX even though MS document says pSink is optional,
-                // StartComposition fails if NULL is passed.
-                let composition =
-                    context_composition.StartComposition(ec, &range, &self.composition_sink);
-                if let Err(error) = &composition {
-                    error!("unable to start composition: {error}");
+        let mut committed = None;
+        let result: Result<()> = (|| {
+            unsafe {
+                if self.composition.borrow().is_none() && self.pending.borrow().is_some() {
+                    debug!("starting a new composition");
+                    let context_composition: ITfContextComposition = self.context.cast()?;
+                    let insert_at_selection: ITfInsertAtSelection = self.context.cast()?;
+                    let range =
+                        insert_at_selection.InsertTextAtSelection(ec, TF_IAS_QUERYONLY, &[])?;
+                    // XXX even though MS document says pSink is optional,
+                    // StartComposition fails if NULL is passed.
+                    let composition =
+                        context_composition.StartComposition(ec, &range, &self.composition_sink);
+                    if let Err(error) = &composition {
+                        error!("unable to start composition: {error}");
+                    }
+                    self.composition.replace(Some(composition?));
                 }
-                self.composition.replace(Some(composition?));
-            }
-            if let Some(composition) = self.composition.borrow().as_ref()
-                && let Some(pending) = self.pending.borrow().as_ref()
-            {
-                let range = composition.GetRange()?;
-                debug!(range:?, commit=pending.commit, preedit=pending.preedit; "set composition string");
-                let text = HSTRING::from(format!("{}{}", pending.commit, pending.preedit));
-                // Set text then shift the range to commit the string.
-                // It seems Cicero doesn't handle multiple edit session very well, so we do
-                // the commit and update composition in one single transaction.
-                range.SetText(ec, 0, &text)?;
-                let mut moved = 0;
-                range.ShiftStart(
-                    ec,
-                    pending.commit.encode_utf16().count() as i32,
-                    &mut moved,
-                    ptr::null(),
-                )?;
-                composition.ShiftStart(ec, &range)?;
-                let disp_attr_prop = self.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
-                let mut atoms = self.da_atom.iter().cycle();
-                for seg in &pending.segments {
-                    let segment_range = range.Clone()?;
-                    segment_range.Collapse(ec, TF_ANCHOR_START)?;
-                    segment_range.ShiftEnd(
+                if let Some(composition) = self.composition.borrow().as_ref()
+                    && let Some(pending) = self.pending.borrow().as_ref()
+                {
+                    let range = composition.GetRange()?;
+                    debug!(range:?, commit=pending.commit, preedit=pending.preedit; "set composition string");
+                    let text = HSTRING::from(format!("{}{}", pending.commit, pending.preedit));
+                    // Set text then shift the range to commit the string.
+                    // It seems Cicero doesn't handle multiple edit session very well, so we do
+                    // the commit and update composition in one single transaction.
+                    range.SetText(ec, 0, &text)?;
+                    let mut moved = 0;
+                    range.ShiftStart(
                         ec,
-                        super::d512_ui::utf16_offset(&pending.preedit, seg.1),
+                        pending.commit.encode_utf16().count() as i32,
                         &mut moved,
                         ptr::null(),
                     )?;
-                    segment_range.ShiftStart(
+                    composition.ShiftStart(ec, &range)?;
+                    // The prefix is now outside the composition. Later attribute or
+                    // selection failures must not relabel this committed text cancel.
+                    committed = pending.on_committed.clone();
+                    let disp_attr_prop = self.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
+                    let mut atoms = self.da_atom.iter().cycle();
+                    for seg in &pending.segments {
+                        let segment_range = range.Clone()?;
+                        segment_range.Collapse(ec, TF_ANCHOR_START)?;
+                        segment_range.ShiftEnd(
+                            ec,
+                            super::d512_ui::utf16_offset(&pending.preedit, seg.1),
+                            &mut moved,
+                            ptr::null(),
+                        )?;
+                        segment_range.ShiftStart(
+                            ec,
+                            super::d512_ui::utf16_offset(&pending.preedit, seg.0),
+                            &mut moved,
+                            ptr::null(),
+                        )?;
+                        if let Err(error) =
+                            disp_attr_prop.SetValue(ec, &segment_range, atoms.next().unwrap())
+                        {
+                            error!("set display attribute failed: {error}");
+                        }
+                    }
+
+                    let cursor_range = range.Clone()?;
+                    let mut moved = 0;
+                    cursor_range.Collapse(ec, TF_ANCHOR_START)?;
+                    cursor_range.ShiftEnd(
                         ec,
-                        super::d512_ui::utf16_offset(&pending.preedit, seg.0),
+                        super::d512_ui::utf16_offset(&pending.preedit, pending.cursor),
                         &mut moved,
                         ptr::null(),
                     )?;
-                    if let Err(error) =
-                        disp_attr_prop.SetValue(ec, &segment_range, atoms.next().unwrap())
-                    {
-                        error!("set display attribute failed: {error}");
+                    cursor_range.ShiftStart(
+                        ec,
+                        super::d512_ui::utf16_offset(&pending.preedit, pending.cursor),
+                        &mut moved,
+                        ptr::null(),
+                    )?;
+                    set_selection(&self.context, ec, cursor_range, TF_AE_END)?;
+                    if let Some(callback) = &pending.on_applied {
+                        applied = Some((callback.clone(), composition.clone()));
                     }
                 }
-
-                let cursor_range = range.Clone()?;
-                let mut moved = 0;
-                cursor_range.Collapse(ec, TF_ANCHOR_START)?;
-                cursor_range.ShiftEnd(
-                    ec,
-                    super::d512_ui::utf16_offset(&pending.preedit, pending.cursor),
-                    &mut moved,
-                    ptr::null(),
-                )?;
-                cursor_range.ShiftStart(
-                    ec,
-                    super::d512_ui::utf16_offset(&pending.preedit, pending.cursor),
-                    &mut moved,
-                    ptr::null(),
-                )?;
-                set_selection(&self.context, ec, cursor_range, TF_AE_END)?;
-                if let Some(callback) = &pending.on_applied {
-                    applied = Some((callback.clone(), composition.clone()));
-                }
             }
+            Ok(())
+        })();
+        // Release both RefCell borrows on success and error before callbacks.
+        if let Some(callback) = committed {
+            callback();
         }
+        result?;
         // TSF UI callbacks may reenter the service: release both RefCell borrows first.
         if let Some((callback, composition)) = applied {
             callback(ec, &composition);

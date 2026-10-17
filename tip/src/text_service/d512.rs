@@ -9,8 +9,11 @@ use chewing_tip_core::{config::ChewingTsfConfig, ipc::d512_client::IpcSentenceSc
 pub(super) fn configure_editor(
     editor: &mut Editor,
     cfg: &ChewingTsfConfig,
+    calibration: &super::d512_calibration::Collector,
 ) -> Result<(), D512Error> {
-    configure_with(editor, cfg, || Box::new(IpcSentenceScorer))
+    configure_with(editor, cfg, || {
+        calibration.track(Box::new(IpcSentenceScorer))
+    })
 }
 fn configure_with(
     editor: &mut Editor,

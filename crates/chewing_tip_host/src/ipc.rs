@@ -193,6 +193,54 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     #[test]
+    #[ignore = "requires the synthetic TIP wire artifact; run explicitly after TIP tests"]
+    fn calibration_tip_wire_fixture_uses_real_host_dispatch_and_writer() {
+        use crate::calibration::tests::{TEST_LOCK, TempDir, always_enabled};
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let input = std::env::var_os("C2_TIP_CALIBRATION_WIRE").expect("synthetic TIP wire path");
+        let output = std::env::var_os("C2_TIP_CALIBRATION_JSONL").expect("synthetic output path");
+        let temp = TempDir::new();
+        let logger = always_enabled(temp.0.clone());
+        let scorer = SharedScorer::load_from_directory(&temp.0);
+        let mut receiver = Cursor::new(std::fs::read(input).unwrap());
+        let mut outgoing = Vec::new();
+        let mut session = None;
+        let mut count = 0;
+        while matches!(
+            ipc_loop_once(
+                &mut receiver,
+                &mut outgoing,
+                |_| panic!("calibration invoked UI"),
+                &mut session,
+                &scorer,
+                &logger
+            )
+            .unwrap(),
+            ControlFlow::Continue(())
+        ) {
+            count += 1;
+        }
+        assert_eq!(count, 4);
+        assert!(outgoing.is_empty());
+        assert!(session.is_none());
+        let path = temp.0.join("calibration.jsonl");
+        let text = std::fs::read_to_string(&path).unwrap();
+        let rows = text
+            .lines()
+            .map(|l| serde_json::from_str::<CalibrationRecord>(l).unwrap())
+            .collect::<Vec<_>>();
+        assert_eq!(rows.len(), 4);
+        for (i, mode) in [(0, "automatic"), (2, "suggest")] {
+            assert_eq!(rows[i].mode, mode);
+            assert_eq!(rows[i].phase, "rerank");
+            assert_eq!(rows[i + 1].phase, "commit");
+            assert_eq!(rows[i].id, rows[i + 1].id);
+            assert_eq!(rows[i + 1].final_committed_text.as_deref(), Some("代錶"));
+        }
+        assert_eq!(rows[3].accepted, Some(true));
+        std::fs::copy(path, output).unwrap();
+    }
+    #[test]
     fn calibration_framed_oneway_writes_without_reply_or_legacy_editor() {
         use crate::calibration::tests::{TEST_LOCK, TempDir, always_enabled, records};
         let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());

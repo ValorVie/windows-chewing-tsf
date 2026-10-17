@@ -30,6 +30,7 @@ use self::key_event::SystemKeyboardEvent;
 
 mod chewing;
 mod d512;
+mod d512_calibration;
 mod d512_ui;
 mod display_attribute;
 mod edit_session;
@@ -75,6 +76,7 @@ pub(super) unsafe trait IFnRunCommand: IUnknown {
 pub(super) struct TextService {
     inner: RefCell<Option<ChewingTextService>>,
     pub(super) d512_epoch: Rc<Cell<u64>>,
+    calibration: RefCell<std::rc::Weak<d512_calibration::Collector>>,
     tid: Cell<u32>,
     thread_cookies: RefCell<Vec<u32>>,
     keyboard_openclose_cookie: Cell<u32>,
@@ -88,6 +90,7 @@ impl TextService {
         TextService {
             inner: RefCell::default(),
             d512_epoch: Rc::new(Cell::new(0)),
+            calibration: RefCell::default(),
             tid: Cell::default(),
             thread_cookies: RefCell::new(vec![]),
             keyboard_openclose_cookie: Cell::new(TF_INVALID_COOKIE),
@@ -98,6 +101,11 @@ impl TextService {
     }
     fn invalidate_d512_hint(&self) {
         self.d512_epoch.set(self.d512_epoch.get().wrapping_add(1));
+        // Focus/context callbacks can be reentrant while inner is borrowed.
+        // Cancel calibration ownership independently of that service borrow.
+        if let Some(calibration) = self.calibration.borrow().upgrade() {
+            calibration.leave_client();
+        }
         if let Ok(mut service) = self.inner.try_borrow_mut()
             && let Some(service) = service.as_mut()
         {

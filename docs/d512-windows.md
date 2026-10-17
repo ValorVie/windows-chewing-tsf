@@ -29,9 +29,31 @@ The margins follow the Mac presets by product decision; they are not the
 libchewing calibration points. Weight is 0.25 for all six presets.
 
 `D512LogCalibration` is a DWORD (0 off by default, 1 on), stored unchanged in
-`ChewingTsfConfig::d512_log_calibration`. The host accepts complete records via
-`im.chewing.d512.CalibrationLog` with `oneway=true`. The TIP producer is a later
-change, so this switch alone does not generate records yet.
+`ChewingTsfConfig::d512_log_calibration`. The TIP collects only when D512 is on
+and this value is exactly 1. When disabled, it does not read the engine's
+calibration getter or send calibration IPC. The libchewing dependency must
+provide both `d512_calibration()` and the single-candidate scoring skip
+described in its `docs/d512.md`.
+
+Each fresh collected preedit evaluation gets a random ID and a `rerank` record.
+Repeated reads of that attempt do not create another record. All pending records
+are retained until commit or cancel. Before passing a commit key to the editor,
+the TIP captures its last available preedit evaluation. Any hidden recomputation
+inside the editor's commit is excluded from collection. Accepting the current suggestion marks its
+receipt `accepted=true` and `applied=true`; it does not commit text. Commit
+receipts are detached before decoding any remaining preedit, then confirmed
+after the TSF document write. They contain the actual output text, including
+simplified conversion. Canceled, denied or replaced writes produce `cancel`.
+Once insertion or the composition-prefix commit succeeds, later display or
+selection errors do not change that record to `cancel`.
+Focus/context changes cancel pending records and invalidate delayed commits;
+turning collection off discards pending and detached receipts.
+
+The host accepts complete records via `im.chewing.d512.CalibrationLog` with
+`oneway=true`. A separate background worker performs connection, attestation,
+serialization and nonblocking pipe writes. The UI only tries a bounded handoff.
+Busy senders and records exceeding the 64 KiB frame limit are dropped without
+retry. Calibration transport failure does not delay the scoring worker.
 
 The host checks the current registry DWORD again for each record; only exactly
 1 enables writing. A shared mutex serializes append operations across pipe
@@ -47,8 +69,9 @@ directory. The host does not choose its installation or working directory.
 Fields match the Mac calibration record, including explicit null `modelLogP`
 and `fused` values when scores are unavailable. Windows emits zero personal
 hits/bonus and false personal/POM conflicts. Mac's actual wire modes are
-`automatic` and `suggest`. The existing analysis script reads these records,
-but its automatic-mode breakdown still filters on the legacy null mode.
+`automatic` and `suggest`. The analysis script accepts both these modes and
+legacy automatic records whose mode is null. Scores from failed or timed-out
+attempts remain null, so they cannot be used as scored calibration examples.
 
 `D512SuggestionAcceptKey` is a DWORD: 0 Tab (default), 1 Ctrl+Tab, 2 Right at
 composition end. In normal Chinese composition without unfinished Zhuyin,

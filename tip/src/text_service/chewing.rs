@@ -148,6 +148,7 @@ pub(super) struct CompositionString {
     pub(super) segments: Vec<(usize, usize)>,
     pub(super) cursor: usize,
     pub(super) on_applied: Option<super::edit_session::CompositionApplied>,
+    pub(super) on_committed: Option<Rc<dyn Fn()>>,
 }
 
 pub(super) struct ChewingTextService {
@@ -175,6 +176,7 @@ pub(super) struct ChewingTextService {
     keymap: KeymapOp,
     keybindings: Vec<Keybinding>,
     chewing_editor: Editor,
+    calibration: Rc<super::d512_calibration::Collector>,
     d512_hint: Rc<super::d512_ui::HintSlot<super::d512_ui::DisplayedHint>>,
     d512_confirmed: String,
     notification: Option<ComObject<Notification>>,
@@ -293,6 +295,7 @@ impl ChewingTextService {
             keymap: KeymapOp::None,
             keybindings: vec![],
             chewing_editor: editor,
+            calibration: Rc::new(super::d512_calibration::Collector::new()),
             d512_hint: Rc::new(super::d512_ui::HintSlot::new(ts.d512_epoch.clone())),
             d512_confirmed: String::new(),
             lang_bar_buttons,
@@ -306,6 +309,7 @@ impl ChewingTextService {
             pending_lang_mode_change: Cell::new(false),
         };
 
+        ts.calibration.replace(Rc::downgrade(&cts.calibration));
         if let Err(error) = cts.init_openclose(tid) {
             error!("unable to initialize openclose: {error:#}");
         }
@@ -320,6 +324,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn deactivate(mut self) -> ITfThreadMgr {
+        self.calibration.leave_client();
         self.withdraw_d512_hint();
         if let Ok(lang_bar_item_mgr) = self.thread_mgr.cast::<ITfLangBarItemMgr>() {
             for button in self.lang_bar_buttons.drain(0..) {
@@ -335,6 +340,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_kill_focus(&mut self, context: Option<ITfContext>) -> Result<()> {
+        self.calibration.leave_client();
         self.withdraw_d512_hint();
         debug!("on_kill_focus");
         self.has_focus = false;
@@ -349,6 +355,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_focus(&mut self) -> Result<()> {
+        self.calibration.leave_client();
         self.withdraw_d512_hint();
         debug!("on_focus");
         self.has_focus = true;
@@ -530,6 +537,8 @@ impl ChewingTextService {
         if let Err(error) = self.apply_config_if_changed() {
             error!("unable to load config: {error:#}");
         }
+        self.calibration.configure(&self.cfg.chewing_tsf);
+        self.calibration.capture(&self.chewing_editor);
         let handled = match self.predict_keydown(context, ev) {
             Ok(handled) => handled,
             Err(error) => {
@@ -554,6 +563,7 @@ impl ChewingTextService {
         self.withdraw_d512_hint();
         match result {
             super::d512_ui::AcceptanceResult::Accepted => {
+                self.calibration.mark_accepted();
                 self.update_preedit(context, String::new())?;
                 return Ok(true);
             }
@@ -749,6 +759,7 @@ impl ChewingTextService {
         }
 
         let last_behavior = self.chewing_editor.last_key_behavior();
+        self.calibration.capture(&self.chewing_editor);
 
         if last_behavior == EditorKeyBehavior::Ignore {
             debug!("early return - chewing ignored key");
@@ -759,13 +770,13 @@ impl ChewingTextService {
         if !self.is_composing()
             && (last_behavior == EditorKeyBehavior::Commit || text_action.is_some())
         {
-            let text = self.chewing_editor.display_commit().to_owned();
+            let mut text = self.chewing_editor.display_commit().to_owned();
             self.chewing_editor.ack();
             debug!(text; "commit string");
-            self.insert_text(context, &text)?;
             if let Some(param) = text_action {
-                self.insert_text(context, &param)?;
+                text.push_str(&param);
             }
+            self.insert_text(context, &text)?;
             debug!("commit string ok");
             return Ok(true);
         }
@@ -912,6 +923,7 @@ impl ChewingTextService {
 
     // SAFETY: this method must not cause TSF callback reentrant
     pub(super) fn on_composition_terminated_tail(&mut self) -> Result<()> {
+        self.calibration.cancel();
         self.withdraw_d512_hint();
         debug!(has_focus=self.has_focus; "on_composition_terminated_tail");
         if self.candidate_list.is_some() {
@@ -1052,6 +1064,9 @@ impl ChewingTextService {
     }
 
     fn update_preedit(&mut self, context: &ITfContext, commit: String) -> Result<()> {
+        // Detach receipts for the committed prefix before decoding the remaining
+        // preedit, whose scoring belongs to the next commit (Mac takeCommitRecords).
+        let receipt = (!commit.is_empty()).then(|| self.calibration.take_commit());
         let mut composition_buf = String::new();
         let mut segments = vec![];
         let cursor = self.chewing_editor.cursor();
@@ -1091,14 +1106,26 @@ impl ChewingTextService {
             segments.push((0, bopomofo_len));
             composition_buf.push_str(&bopomofo);
         }
+        self.calibration.configure(&self.cfg.chewing_tsf);
+        self.calibration.capture(&self.chewing_editor);
+        if self.chewing_editor.is_empty() && commit.is_empty() {
+            self.calibration.cancel();
+        }
 
         // has something in composition buffer
         if !composition_buf.is_empty() {
-            self.set_composition_string(context, &commit, &composition_buf, segments, cursor)?;
+            self.set_composition_with_receipt(
+                context,
+                &commit,
+                &composition_buf,
+                segments,
+                cursor,
+                receipt,
+            )?;
         } else {
             // nothing left in composition buffer, terminate composition status
             if self.is_composing() {
-                self.set_composition_string(context, &commit, "", vec![], 0)?;
+                self.set_composition_with_receipt(context, &commit, "", vec![], 0, receipt)?;
             }
             // We also need to make sure that the candidate window is not
             // currently shown. When typing symbols with ` key, it's possible
@@ -1114,7 +1141,14 @@ impl ChewingTextService {
     fn insert_text(&self, context: &ITfContext, text: &str) -> Result<()> {
         debug!(text; "going to request immediate text insertion");
         let htext = text.into();
-        let session = InsertText::new(context.clone(), htext).into_object();
+        let receipt = self.calibration.take_commit();
+        let committed = text.to_owned();
+        let session = InsertText::new(
+            context.clone(),
+            htext,
+            Rc::new(move || receipt.confirm(&committed)),
+        )
+        .into_object();
         request_edit_session(
             context,
             self.tid,
@@ -1147,8 +1181,21 @@ impl ChewingTextService {
         segments: Vec<(usize, usize)>,
         cursor: usize,
     ) -> Result<()> {
+        let receipt = (!commit.is_empty()).then(|| self.calibration.take_commit());
+        self.set_composition_with_receipt(context, commit, preedit, segments, cursor, receipt)
+    }
+
+    fn set_composition_with_receipt(
+        &mut self,
+        context: &ITfContext,
+        commit: &str,
+        preedit: &str,
+        segments: Vec<(usize, usize)>,
+        cursor: usize,
+        receipt: Option<Rc<super::d512_calibration::CommitReceipt>>,
+    ) -> Result<()> {
         debug!(commit, preedit; "set composition string");
-        let commit = if self.output_simp_chinese {
+        let commit: String = if self.output_simp_chinese {
             zhconv(commit, Variant::ZhHans).into()
         } else {
             commit.into()
@@ -1159,6 +1206,10 @@ impl ChewingTextService {
             preedit.into()
         };
         let on_applied = self.d512_publication(context, &preedit, cursor);
+        let on_committed = receipt.map(|receipt| {
+            let committed = commit.clone();
+            Rc::new(move || receipt.confirm(&committed)) as Rc<dyn Fn()>
+        });
         if let Some(cell) = self.pending_edit.upgrade() {
             debug!(cursor, preedit:%; "Reuse existing edit session");
             cell.replace(Some(CompositionString {
@@ -1167,6 +1218,7 @@ impl ChewingTextService {
                 segments,
                 cursor,
                 on_applied,
+                on_committed,
             }));
         } else {
             let pending = Rc::new(RefCell::new(Some(CompositionString {
@@ -1175,6 +1227,7 @@ impl ChewingTextService {
                 segments,
                 cursor,
                 on_applied,
+                on_committed,
             })));
             let session = SetCompositionString::new(
                 context.clone(),
@@ -1590,7 +1643,7 @@ impl ChewingTextService {
         Ok(())
     }
 
-    fn build_editor_from_cfg(cfg: &ChewingTsfConfig) -> Result<Editor> {
+    fn build_editor_from_cfg(&self, cfg: &ChewingTsfConfig) -> Result<Editor> {
         // Recreate editor to load latest user files
         let mut editor = Editor::chewing(None, None)?;
         editor.set_editor_options(|opt| {
@@ -1619,7 +1672,7 @@ impl ChewingTextService {
             .unwrap_or(KeyboardLayoutCompat::Default);
         editor.set_syllable_editor(syl_editor_from_kbtype(kbtype));
         // Configuration or transport failure leaves the native engine usable.
-        let _ = super::d512::configure_editor(&mut editor, cfg);
+        let _ = super::d512::configure_editor(&mut editor, cfg, &self.calibration);
         Ok(editor)
     }
 
@@ -1661,6 +1714,8 @@ impl ChewingTextService {
     /// Applys config changes that should be effective at runtime
     fn apply_runtime_config(&mut self) -> Result<()> {
         self.withdraw_d512_hint();
+        self.calibration.configure(&self.cfg.chewing_tsf);
+        self.calibration.cancel();
         let cfg = &self.cfg.chewing_tsf;
         self.kbtype = KeyboardLayoutCompat::try_from(cfg.keyboard_layout as u8)
             .unwrap_or(KeyboardLayoutCompat::Default);
@@ -1669,7 +1724,7 @@ impl ChewingTextService {
             let sim = SimulatedKeyboard::from(cfg.simulate_english_layout);
             self.keymap = sim.into();
         }
-        self.chewing_editor = Self::build_editor_from_cfg(cfg)?;
+        self.chewing_editor = self.build_editor_from_cfg(cfg)?;
         let _ = self.update_lang_buttons();
         let keybindings = cfg
             .keybind

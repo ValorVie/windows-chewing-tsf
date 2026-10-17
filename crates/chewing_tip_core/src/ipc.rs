@@ -1,5 +1,6 @@
 use scoped_error::impl_context_error;
 
+pub mod calibration_client;
 pub mod client;
 pub mod d512;
 pub mod d512_client;
