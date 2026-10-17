@@ -17,8 +17,16 @@ engine's atomic suggestion API and leaves composition active without committing.
 Automatic parameters use `D512Weight` / `D512Margin`; suggestion parameters use
 `D512SuggestWeight` / `D512SuggestMargin`. Both pairs are decimal strings, with
 missing, invalid, nonfinite or negative values using that mode's defaults.
-The balanced suggestion pair is `(0.25, 4.288167167322101)`; preserve its full
-precision. Automatic defaults remain `(0.25, 0.25)`.
+Defaults use the balanced pairs below. Existing saved values, including former
+defaults, remain unchanged when loaded or saved with unrelated settings.
+
+| Mode | Conservative | Balanced (default) | Aggressive |
+| --- | --- | --- | --- |
+| Automatic (weight / margin) | 0.25 / 1 | 0.25 / 0.5 | 0.25 / 0.2 |
+| Suggestion (weight / margin) | 0.25 / 3 | 0.25 / 2 | 0.25 / 1 |
+
+The margins follow the Mac presets by product decision; they are not the
+libchewing calibration points. Weight is 0.25 for all six presets.
 
 `D512SuggestionAcceptKey` is a DWORD: 0 Tab (default), 1 Ctrl+Tab, 2 Right at
 composition end. In normal Chinese composition without unfinished Zhuyin,

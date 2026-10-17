@@ -35,8 +35,8 @@ use windows::{
 };
 use windows_registry::{CURRENT_USER, Key};
 
-// Balanced suggestion preset; keep the calibrated threshold at full precision.
-pub const DEFAULT_D512_SUGGEST_PARAMS: (f64, f64) = (0.25, 4.288167167322101);
+// Balanced suggestion preset: Mac margin with the Chewing weight.
+pub const DEFAULT_D512_SUGGEST_PARAMS: (f64, f64) = (0.25, 2.0);
 
 #[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Config {
@@ -114,7 +114,7 @@ fn default_d512_weight() -> f64 {
 }
 
 fn default_d512_margin() -> f64 {
-    0.25
+    0.5
 }
 
 fn default_d512_suggest_weight() -> f64 {
