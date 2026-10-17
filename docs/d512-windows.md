@@ -12,8 +12,30 @@ write and read operations have deadlines and a 64 KiB frame limit. Errors,
 busy state and late replies preserve the engine's complete native order. Host
 launches are throttled to one attempt per 30 seconds, with no scoring retry.
 Mode 0 creates no IPC scorer and makes no connection or launch attempt. Mode 2
-is stored unchanged and currently uses automatic behavior; suggestion acceptance
-is a later change.
+keeps native text and shows a separate suggestion. Acceptance calls the
+engine's atomic suggestion API and leaves composition active without committing.
+Automatic parameters use `D512Weight` / `D512Margin`; suggestion parameters use
+`D512SuggestWeight` / `D512SuggestMargin`. Both pairs are decimal strings, with
+missing, invalid, nonfinite or negative values using that mode's defaults.
+The balanced suggestion pair is `(0.25, 4.288167167322101)`; preserve its full
+precision. Automatic defaults remain `(0.25, 0.25)`.
+
+`D512SuggestionAcceptKey` is a DWORD: 0 Tab (default), 1 Ctrl+Tab, 2 Right at
+composition end. In normal Chinese composition without unfinished Zhuyin,
+Tab/Ctrl+Tab in their configured mode consume the gesture even without a valid
+suggestion; Right keeps native behavior when acceptance fails. Other modifiers,
+candidate windows and keybindings retain their existing behavior. The hint
+identifies the configured gesture. Only the pure Ctrl prefix of configured
+Ctrl+Tab preserves the hint; other keys withdraw it.
+
+Hints reuse Notification with an independent owner and no timeout. UI suppression
+by TSF is respected. Acceptance requires a visible current hint, a fresh engine
+report, matching TSF context/composition, and a synchronous read of the actual
+preedit, confirmed context and collapsed selection. Read errors or mismatches
+never apply cached text. No TextEditSink is subscribed: a mouse edit can leave
+a hint visible until the next key/focus/composition event, but acceptance checks
+its current document state. Deferred preedit callbacks use a shared generation
+and weak ownership so old contexts cannot restore a dismissed hint.
 
 Confirmed context is read before the composition range, with at most 64 Unicode
 scalar values. A failed TSF read uses empty context. Requests and scores are not

@@ -111,6 +111,7 @@ impl SetCompositionString {
 
 impl ITfEditSession_Impl for SetCompositionString_Impl {
     fn DoEditSession(&self, ec: u32) -> Result<()> {
+        let mut applied = None;
         unsafe {
             if self.composition.borrow().is_none() && self.pending.borrow().is_some() {
                 debug!("starting a new composition");
@@ -135,13 +136,11 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                 // Set text then shift the range to commit the string.
                 // It seems Cicero doesn't handle multiple edit session very well, so we do
                 // the commit and update composition in one single transaction.
-                if let Err(error) = range.SetText(ec, 0, &text) {
-                    error!("set composition string failed: {error}");
-                }
+                range.SetText(ec, 0, &text)?;
                 let mut moved = 0;
                 range.ShiftStart(
                     ec,
-                    pending.commit.chars().count() as i32,
+                    pending.commit.encode_utf16().count() as i32,
                     &mut moved,
                     ptr::null(),
                 )?;
@@ -151,8 +150,18 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                 for seg in &pending.segments {
                     let segment_range = range.Clone()?;
                     segment_range.Collapse(ec, TF_ANCHOR_START)?;
-                    segment_range.ShiftEnd(ec, seg.1 as i32, &mut moved, ptr::null())?;
-                    segment_range.ShiftStart(ec, seg.0 as i32, &mut moved, ptr::null())?;
+                    segment_range.ShiftEnd(
+                        ec,
+                        super::d512_ui::utf16_offset(&pending.preedit, seg.1),
+                        &mut moved,
+                        ptr::null(),
+                    )?;
+                    segment_range.ShiftStart(
+                        ec,
+                        super::d512_ui::utf16_offset(&pending.preedit, seg.0),
+                        &mut moved,
+                        ptr::null(),
+                    )?;
                     if let Err(error) =
                         disp_attr_prop.SetValue(ec, &segment_range, atoms.next().unwrap())
                     {
@@ -163,10 +172,27 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                 let cursor_range = range.Clone()?;
                 let mut moved = 0;
                 cursor_range.Collapse(ec, TF_ANCHOR_START)?;
-                cursor_range.ShiftEnd(ec, pending.cursor as i32, &mut moved, ptr::null())?;
-                cursor_range.ShiftStart(ec, pending.cursor as i32, &mut moved, ptr::null())?;
+                cursor_range.ShiftEnd(
+                    ec,
+                    super::d512_ui::utf16_offset(&pending.preedit, pending.cursor),
+                    &mut moved,
+                    ptr::null(),
+                )?;
+                cursor_range.ShiftStart(
+                    ec,
+                    super::d512_ui::utf16_offset(&pending.preedit, pending.cursor),
+                    &mut moved,
+                    ptr::null(),
+                )?;
                 set_selection(&self.context, ec, cursor_range, TF_AE_END)?;
+                if let Some(callback) = &pending.on_applied {
+                    applied = Some((callback.clone(), composition.clone()));
+                }
             }
+        }
+        // TSF UI callbacks may reenter the service: release both RefCell borrows first.
+        if let Some((callback, composition)) = applied {
+            callback(ec, &composition);
         }
         Ok(())
     }
@@ -330,4 +356,109 @@ impl ITfEditSession_Impl for ConfirmedContext_Impl {
         }
         Ok(())
     }
+}
+
+pub(super) type CompositionApplied = Rc<dyn Fn(u32, &ITfComposition)>;
+
+#[implement(ITfEditSession)]
+pub(super) struct SuggestionDocument {
+    context: ITfContext,
+    composition: ITfComposition,
+    snapshot: RefCell<Option<super::d512_ui::DocumentSnapshot>>,
+}
+impl SuggestionDocument {
+    pub(super) fn new(context: ITfContext, composition: ITfComposition) -> Self {
+        Self {
+            context,
+            composition,
+            snapshot: RefCell::new(None),
+        }
+    }
+    pub(super) fn snapshot(&self) -> Option<super::d512_ui::DocumentSnapshot> {
+        self.snapshot.take()
+    }
+}
+impl ITfEditSession_Impl for SuggestionDocument_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        self.snapshot.replace(
+            read_suggestion_document(ec, &self.context, &self.composition)?
+                .map(|(snapshot, _)| snapshot),
+        );
+        Ok(())
+    }
+}
+
+// Bounded reads only; the caller checks context/composition identity and epoch.
+pub(super) fn read_suggestion_document(
+    ec: u32,
+    context: &ITfContext,
+    composition: &ITfComposition,
+) -> Result<Option<(super::d512_ui::DocumentSnapshot, RECT)>> {
+    unsafe {
+        let range = composition.GetRange()?;
+        let Some(preedit) = bounded_text(ec, &range)? else {
+            return Ok(None);
+        };
+        let mut selections = [TF_SELECTION::default(); 1];
+        let mut count = 0;
+        let result = context.GetSelection(ec, TF_DEFAULT_SELECTION, &mut selections, &mut count);
+        let [selection] = selections;
+        let selected = ManuallyDrop::into_inner(selection.range);
+        result?;
+        if count != 1 || selection.style.fInterimChar.as_bool() {
+            return Ok(None);
+        }
+        let Some(selected) = selected else {
+            return Ok(None);
+        };
+        if selected.CompareStart(ec, &selected, TF_ANCHOR_END)? != 0
+            || selected.CompareStart(ec, &range, TF_ANCHOR_START)? < 0
+            || selected.CompareEnd(ec, &range, TF_ANCHOR_END)? > 0
+        {
+            return Ok(None);
+        }
+        let prefix = range.Clone()?;
+        prefix.ShiftEndToRange(ec, &selected, TF_ANCHOR_START)?;
+        let Some(prefix) = bounded_text(ec, &prefix)? else {
+            return Ok(None);
+        };
+        let before = range.Clone()?;
+        before.Collapse(ec, TF_ANCHOR_START)?;
+        let mut shifted = 0;
+        before.ShiftStart(ec, -128, &mut shifted, ptr::null())?;
+        let mut units = [0; 128];
+        let mut length = 0;
+        before.GetText(ec, 0, &mut units, &mut length)?;
+        let Some(units) = units.get(..length as usize) else {
+            return Ok(None);
+        };
+        let confirmed = super::d512::confirmed_tail(units);
+        let mut rect = RECT::default();
+        let mut clipped = BOOL::default();
+        context
+            .GetActiveView()?
+            .GetTextExt(ec, &selected, &mut rect, &mut clipped)?;
+        if clipped.as_bool() {
+            return Ok(None);
+        }
+        Ok(Some((
+            super::d512_ui::DocumentSnapshot {
+                preedit,
+                confirmed,
+                cursor: prefix.chars().count(),
+            },
+            rect,
+        )))
+    }
+}
+fn bounded_text(ec: u32, range: &ITfRange) -> Result<Option<String>> {
+    let mut units = [0u16; 257];
+    let mut length = 0;
+    unsafe {
+        range.GetText(ec, 0, &mut units, &mut length)?;
+    }
+    if length > 256 {
+        return Ok(None);
+    }
+    Ok(String::from_utf16(&units[..length as usize]).ok())
 }

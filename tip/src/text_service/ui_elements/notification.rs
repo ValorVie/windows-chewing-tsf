@@ -73,7 +73,7 @@ struct NotificationInner {
     view: RefCell<View>,
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(crate) struct NotificationModel {
     pub(crate) text: HSTRING,
     pub(crate) font_family: HSTRING,
@@ -81,6 +81,7 @@ pub(crate) struct NotificationModel {
     pub(crate) fg_color: D2D1_COLOR_F,
     pub(crate) bg_color: D2D1_COLOR_F,
     pub(crate) border_color: D2D1_COLOR_F,
+    pub(crate) max_text_width: Option<f32>,
 }
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -228,7 +229,7 @@ impl View {
                     dwrite_factory.CreateTextLayout(
                         &model.text,
                         &text_format,
-                        f32::MAX,
+                        model.max_text_width.unwrap_or(f32::MAX),
                         f32::MAX,
                     )?
                 };
@@ -317,8 +318,8 @@ impl View {
                     let text_rect = D2D_RECT_F {
                         left: margin,
                         top: margin,
-                        right: margin + width,
-                        bottom: margin + height,
+                        right: width - margin,
+                        bottom: height - margin,
                     };
                     let brush = dc.CreateSolidColorBrush(&model.fg_color, None)?;
                     dc.DrawText(
@@ -378,7 +379,10 @@ impl Notification {
         unsafe {
             ui_manager.BeginUIElement(&ui_element, &mut should_show, &mut ui_element_id)?;
             candidate_list.set_element_id(ui_element_id);
-            candidate_list.Show(should_show)?;
+            if let Err(error) = candidate_list.Show(should_show) {
+                candidate_list.end_ui_element();
+                return Err(error.into());
+            }
         }
         Ok(candidate_list)
     }
@@ -430,6 +434,15 @@ impl Notification {
         if let Some(window) = self.inner.view.borrow().window() {
             window.set_position(x, y);
         }
+    }
+    pub(crate) fn is_visible(&self) -> bool {
+        self.inner
+            .view
+            .borrow()
+            .window()
+            .is_some_and(|window| unsafe {
+                windows::Win32::UI::WindowsAndMessaging::IsWindowVisible(window.hwnd()).as_bool()
+            })
     }
     pub(crate) fn show(&self) {
         if let Some(window) = self.inner.view.borrow().window() {

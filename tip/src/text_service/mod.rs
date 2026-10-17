@@ -4,6 +4,7 @@
 use std::{
     cell::{Cell, RefCell},
     ptr::null_mut,
+    rc::Rc,
 };
 
 use log::{debug, error};
@@ -29,6 +30,7 @@ use self::key_event::SystemKeyboardEvent;
 
 mod chewing;
 mod d512;
+mod d512_ui;
 mod display_attribute;
 mod edit_session;
 mod icons;
@@ -72,6 +74,7 @@ pub(super) unsafe trait IFnRunCommand: IUnknown {
 )]
 pub(super) struct TextService {
     inner: RefCell<Option<ChewingTextService>>,
+    pub(super) d512_epoch: Rc<Cell<u64>>,
     tid: Cell<u32>,
     thread_cookies: RefCell<Vec<u32>>,
     keyboard_openclose_cookie: Cell<u32>,
@@ -84,6 +87,7 @@ impl TextService {
     pub(super) fn new() -> TextService {
         TextService {
             inner: RefCell::default(),
+            d512_epoch: Rc::new(Cell::new(0)),
             tid: Cell::default(),
             thread_cookies: RefCell::new(vec![]),
             keyboard_openclose_cookie: Cell::new(TF_INVALID_COOKIE),
@@ -92,7 +96,20 @@ impl TextService {
             pimedpi: Cell::new(null_mut()),
         }
     }
+    fn invalidate_d512_hint(&self) {
+        self.d512_epoch.set(self.d512_epoch.get().wrapping_add(1));
+        if let Ok(mut service) = self.inner.try_borrow_mut()
+            && let Some(service) = service.as_mut()
+        {
+            service.withdraw_d512_hint();
+        }
+    }
     fn tail_handler(&self) {
+        if let Ok(service) = self.inner.try_borrow()
+            && let Some(service) = service.as_ref()
+        {
+            service.prune_d512_hint();
+        }
         if self.composition_terminated.take() {
             let Ok(mut borrowed_ts) = self.inner.try_borrow_mut() else {
                 error!("text service was borrowed mutably when executing tail handler.");
@@ -297,12 +314,15 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
             focus:? = pdimfocus.as_ref(),
             prevfocus:? = pdimprevfocus.as_ref(); "on_set_focus"
         );
+        self.invalidate_d512_hint();
         // Excel switches document upon first key down. Skip this superflos
         // focus change.
         if self.key_busy.get() {
             return Ok(());
         }
-        let mut borrowed_ts = self.inner.borrow_mut();
+        let Ok(mut borrowed_ts) = self.inner.try_borrow_mut() else {
+            return Ok(());
+        };
         let Some(ts) = borrowed_ts.as_mut() else {
             debug!("nested borrow - abort on_set_focus");
             return Ok(());
@@ -323,10 +343,12 @@ impl ITfThreadMgrEventSink_Impl for TextService_Impl {
     }
 
     fn OnPushContext(&self, _pic: Ref<ITfContext>) -> Result<()> {
+        self.invalidate_d512_hint();
         Ok(())
     }
 
     fn OnPopContext(&self, _pic: Ref<ITfContext>) -> Result<()> {
+        self.invalidate_d512_hint();
         Ok(())
     }
 }
@@ -351,6 +373,7 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
         Ok(())
     }
     fn OnKillThreadFocus(&self) -> Result<()> {
+        self.invalidate_d512_hint();
         debug!("on_kill_thread_focus");
         Ok(())
     }
@@ -358,6 +381,9 @@ impl ITfThreadFocusSink_Impl for TextService_Impl {
 
 impl ITfKeyEventSink_Impl for TextService_Impl {
     fn OnSetFocus(&self, foreground: BOOL) -> Result<()> {
+        if !foreground.as_bool() {
+            self.invalidate_d512_hint();
+        }
         debug!(foreground:?; "ITfKeyEventSink::OnSetFocus");
         Ok(())
     }
@@ -472,6 +498,7 @@ impl ITfCompositionSink_Impl for TextService_Impl {
         pcomposition: Ref<ITfComposition>,
     ) -> Result<()> {
         let _fp = FpGuard::enter();
+        self.invalidate_d512_hint();
         debug!("on_composition_terminated");
         // This is called by TSF when our composition is terminated by others.
         // For example, when the user click on another text editor and the input focus is

@@ -147,6 +147,7 @@ pub(super) struct CompositionString {
     pub(super) preedit: String,
     pub(super) segments: Vec<(usize, usize)>,
     pub(super) cursor: usize,
+    pub(super) on_applied: Option<super::edit_session::CompositionApplied>,
 }
 
 pub(super) struct ChewingTextService {
@@ -174,6 +175,8 @@ pub(super) struct ChewingTextService {
     keymap: KeymapOp,
     keybindings: Vec<Keybinding>,
     chewing_editor: Editor,
+    d512_hint: Rc<super::d512_ui::HintSlot<super::d512_ui::DisplayedHint>>,
+    d512_confirmed: String,
     notification: Option<ComObject<Notification>>,
     candidate_list: Option<ComObject<CandidateList>>,
     composition: Rc<RefCell<Option<ITfComposition>>>,
@@ -290,6 +293,8 @@ impl ChewingTextService {
             keymap: KeymapOp::None,
             keybindings: vec![],
             chewing_editor: editor,
+            d512_hint: Rc::new(super::d512_ui::HintSlot::new(ts.d512_epoch.clone())),
+            d512_confirmed: String::new(),
             lang_bar_buttons,
             switch_lang_button,
             switch_shape_button,
@@ -315,6 +320,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn deactivate(mut self) -> ITfThreadMgr {
+        self.withdraw_d512_hint();
         if let Ok(lang_bar_item_mgr) = self.thread_mgr.cast::<ITfLangBarItemMgr>() {
             for button in self.lang_bar_buttons.drain(0..) {
                 if let Err(error) = unsafe { lang_bar_item_mgr.RemoveItem(&button) } {
@@ -329,6 +335,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_kill_focus(&mut self, context: Option<ITfContext>) -> Result<()> {
+        self.withdraw_d512_hint();
         debug!("on_kill_focus");
         self.has_focus = false;
         if self.is_composing()
@@ -342,6 +349,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_focus(&mut self) -> Result<()> {
+        self.withdraw_d512_hint();
         debug!("on_focus");
         self.has_focus = true;
         Ok(())
@@ -384,6 +392,19 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_test_keydown(
+        &mut self,
+        context: &ITfContext,
+        ev: SystemKeyboardEvent,
+    ) -> Result<bool> {
+        // A suggestion-mode probe only routes the actual key. Invalidations,
+        // legacy shortcut filtering and acceptance happen once, in OnKeyDown.
+        if self.cfg.chewing_tsf.effective_d512_mode() == 2 && self.is_composing() {
+            return Ok(true);
+        }
+        self.native_test_keydown(context, ev)
+    }
+
+    fn native_test_keydown(
         &mut self,
         context: &ITfContext,
         ev: SystemKeyboardEvent,
@@ -457,6 +478,9 @@ impl ChewingTextService {
             debug!("key not handled - Alt modifier key was down");
             return Ok(false);
         }
+        if self.d512_gesture(evt) != super::d512::AcceptanceGesture::None {
+            return Ok(true);
+        }
         if evt.is_state_on(KeyState::Control) {
             // bypass IME. This might be a shortcut key used in the application
             if self.is_composing() && evt.ksym.is_digit() {
@@ -518,7 +542,37 @@ impl ChewingTextService {
         context: &ITfContext,
         ev: SystemKeyboardEvent,
     ) -> Result<bool> {
-        if !self.on_test_keydown(context, ev)? {
+        let handled = match self.native_test_keydown(context, ev) {
+            Ok(handled) => handled,
+            Err(error) => {
+                self.withdraw_d512_hint();
+                return Err(error);
+            }
+        };
+        let event = ev.to_keyboard_event(self.keymap);
+        let mut tab = event;
+        tab.ksym = keysym::SYM_TAB;
+        // Preserve the visible proposal through the physical Ctrl prefix of
+        // Ctrl+Tab. The modifier itself stays native and never touches editor/context.
+        if !handled && super::d512_ui::acceptance_prefix(event, self.d512_gesture(tab)) {
+            return Ok(false);
+        }
+        let gesture = if handled {
+            self.d512_gesture(ev.to_keyboard_event(self.keymap))
+        } else {
+            super::d512::AcceptanceGesture::None
+        };
+        let result = self.try_d512_acceptance(context, gesture);
+        self.withdraw_d512_hint();
+        match result {
+            super::d512_ui::AcceptanceResult::Accepted => {
+                self.update_preedit(context, String::new())?;
+                return Ok(true);
+            }
+            super::d512_ui::AcceptanceResult::Consumed => return Ok(true),
+            super::d512_ui::AcceptanceResult::Native => {}
+        }
+        if !handled {
             return Ok(false);
         }
         if self.cfg.chewing_tsf.effective_d512_mode() != 0 {
@@ -541,6 +595,7 @@ impl ChewingTextService {
             } else {
                 String::new()
             };
+            self.d512_confirmed = confirmed.clone();
             self.chewing_editor.set_d512_context(&confirmed);
         }
         let mut evt = ev.to_keyboard_event(self.keymap);
@@ -869,6 +924,7 @@ impl ChewingTextService {
 
     // SAFETY: this method must not cause TSF callback reentrant
     pub(super) fn on_composition_terminated_tail(&mut self) -> Result<()> {
+        self.withdraw_d512_hint();
         debug!(has_focus=self.has_focus; "on_composition_terminated_tail");
         if self.candidate_list.is_some() {
             self.hide_candidates();
@@ -889,6 +945,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_compartment_change_ro(&self, guid: &GUID) -> Result<()> {
+        self.d512_hint.withdraw();
         debug!(has_focus=self.has_focus; "on_compartment_change_ro");
         if guid == &GUID_COMPARTMENT_KEYBOARD_OPENCLOSE
             && !self.pending_lang_mode_change.take()
@@ -935,6 +992,7 @@ impl ChewingTextService {
     }
 
     pub(super) fn on_command(&mut self, id: u32, cmd_type: CommandType) {
+        self.withdraw_d512_hint();
         if matches!(cmd_type, CommandType::RightClick) {
             if id == ID_MODE_ICON {
                 let mut pos = POINT::default();
@@ -1079,6 +1137,7 @@ impl ChewingTextService {
     }
 
     fn end_composition(&mut self, context: &ITfContext) -> Result<()> {
+        self.withdraw_d512_hint();
         // Transfer the ownership of this composition to the EndComposition edit session.
         let composition = mem::replace(&mut self.composition, Rc::new(RefCell::new(None)));
         self.pending_edit = Weak::new();
@@ -1106,11 +1165,12 @@ impl ChewingTextService {
         } else {
             commit.into()
         };
-        let preedit = if self.output_simp_chinese {
+        let preedit: String = if self.output_simp_chinese {
             zhconv(preedit, Variant::ZhHans).into()
         } else {
             preedit.into()
         };
+        let on_applied = self.d512_publication(context, &preedit, cursor);
         if let Some(cell) = self.pending_edit.upgrade() {
             debug!(cursor, preedit:%; "Reuse existing edit session");
             cell.replace(Some(CompositionString {
@@ -1118,6 +1178,7 @@ impl ChewingTextService {
                 preedit,
                 segments,
                 cursor,
+                on_applied,
             }));
         } else {
             let pending = Rc::new(RefCell::new(Some(CompositionString {
@@ -1125,6 +1186,7 @@ impl ChewingTextService {
                 preedit,
                 segments,
                 cursor,
+                on_applied,
             })));
             let session = SetCompositionString::new(
                 context.clone(),
@@ -1145,6 +1207,122 @@ impl ChewingTextService {
         Ok(())
     }
 
+    pub(super) fn withdraw_d512_hint(&mut self) {
+        self.d512_hint.withdraw();
+        self.d512_confirmed.clear();
+    }
+    pub(super) fn prune_d512_hint(&self) {
+        self.d512_hint.prune_stale();
+    }
+
+    fn d512_gesture(&self, event: KeyboardEvent) -> super::d512::AcceptanceGesture {
+        if !self.has_focus
+            || self.lang_mode.get() != TsfLangMode::Chinese
+            || self.candidate_list.is_some()
+            || self
+                .keybindings
+                .iter()
+                .any(|binding| binding.matches(&event))
+        {
+            return super::d512::AcceptanceGesture::None;
+        }
+        super::d512::acceptance_gesture(&self.chewing_editor, &self.cfg.chewing_tsf, event)
+    }
+    fn try_d512_acceptance(
+        &mut self,
+        context: &ITfContext,
+        gesture: super::d512::AcceptanceGesture,
+    ) -> super::d512_ui::AcceptanceResult {
+        use super::{
+            d512::AcceptanceGesture,
+            d512_ui::{dispatch_acceptance, same_object},
+            edit_session::SuggestionDocument,
+        };
+        if gesture == AcceptanceGesture::None {
+            return super::d512_ui::AcceptanceResult::Native;
+        }
+        let pending = self.d512_hint.visible_snapshot();
+        let mut observed = None;
+        let identities_match = pending.as_ref().is_some_and(|pending| {
+            same_object(context, &pending.context)
+                && self
+                    .composition
+                    .borrow()
+                    .as_ref()
+                    .is_some_and(|composition| same_object(composition, &pending.composition))
+                && unsafe {
+                    self.thread_mgr
+                        .GetFocus()
+                        .and_then(|manager| manager.GetTop())
+                }
+                .is_ok_and(|active| same_object(&active, context))
+        });
+        if identities_match && let Some(pending) = &pending {
+            let session =
+                SuggestionDocument::new(context.clone(), pending.composition.clone()).into_object();
+            let result = unsafe {
+                context.RequestEditSession(
+                    self.tid,
+                    session.as_interface(),
+                    TF_ES_SYNC | TF_ES_READ,
+                )
+            };
+            if result.is_ok_and(|result| result.is_ok()) {
+                observed = session.snapshot();
+            }
+        }
+        let current = identities_match
+            && pending
+                .as_ref()
+                .is_some_and(|pending| pending.epoch == self.d512_hint.epoch.get())
+            && self.d512_hint.visible_snapshot().is_some();
+        dispatch_acceptance(
+            &mut self.chewing_editor,
+            gesture,
+            pending
+                .as_ref()
+                .map(|pending| (&pending.document, &pending.proposal)),
+            observed.as_ref(),
+            current,
+        )
+    }
+    fn d512_publication(
+        &self,
+        context: &ITfContext,
+        preedit: &str,
+        cursor: usize,
+    ) -> Option<super::edit_session::CompositionApplied> {
+        let cfg = &self.cfg.chewing_tsf;
+        if cfg.effective_d512_mode() != 2
+            || !self.has_focus
+            || self.lang_mode.get() != TsfLangMode::Chinese
+            || self.candidate_list.is_some()
+            || !self.chewing_editor.is_entering()
+            || self.chewing_editor.entering_syllable()
+            || self
+                .notification
+                .as_ref()
+                .is_some_and(|notification| notification.is_visible())
+        {
+            return None;
+        }
+        let report = self.chewing_editor.d512_report()?;
+        let proposal = report.suggestion.filter(|_| report.fallback.is_none())?;
+        Some(super::d512_ui::publication(
+            &self.d512_hint,
+            context.clone(),
+            self.thread_mgr.clone(),
+            cfg,
+            self.output_simp_chinese,
+            super::d512_ui::DocumentSnapshot {
+                preedit: preedit.to_owned(),
+                confirmed: self.d512_confirmed.clone(),
+                cursor,
+            },
+            proposal,
+        ))
+    }
+
     fn get_selection_rect(&self, context: &ITfContext) -> Result<RECT> {
         let session = SelectionRect::new(context.clone()).into_object();
         request_edit_session(
@@ -1162,6 +1340,7 @@ impl ChewingTextService {
         text: &HSTRING,
         dur: Duration,
     ) -> Result<(), scoped_error::Error> {
+        self.withdraw_d512_hint();
         expect_error("Failed to show message", || {
             let hwnd = unsafe {
                 let view = context.GetActiveView()?;
@@ -1176,6 +1355,7 @@ impl ChewingTextService {
                 fg_color: color_s(&self.cfg.chewing_tsf.notify_fg_color),
                 bg_color: color_s(&self.cfg.chewing_tsf.notify_bg_color),
                 border_color: color_s(&self.cfg.chewing_tsf.notify_border_color),
+                max_text_width: None,
             });
             if let Ok(rect) = self.get_selection_rect(context) {
                 notification.set_position(rect.left + 50, rect.bottom + 50);
@@ -1487,6 +1667,7 @@ impl ChewingTextService {
 
     /// Applys config changes that should be effective at runtime
     fn apply_runtime_config(&mut self) -> Result<()> {
+        self.withdraw_d512_hint();
         let cfg = &self.cfg.chewing_tsf;
         self.kbtype = KeyboardLayoutCompat::try_from(cfg.keyboard_layout as u8)
             .unwrap_or(KeyboardLayoutCompat::Default);
