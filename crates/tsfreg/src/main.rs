@@ -5,9 +5,8 @@
 
 use std::{env, process};
 
-use chewing_tip_core::ipc::{client::ChewingIpcClient, messages::Stop, varlink::MethodCall};
+use chewing_tip_core::ipc::client::stop_host;
 use scoped_error::ErrorExt;
-use serde_json::Value;
 use windows::{
     Win32::{
         Globalization::*,
@@ -166,19 +165,7 @@ fn disable() {
 }
 
 fn stop() {
-    let client = ChewingIpcClient::new();
-    if let Err(error) = client.connect() {
-        println!("Error: failed to stop chewing_tip_host");
-        println!("Caused by: {}", error.report());
-        return;
-    }
-    if let Err(error) = client.send(MethodCall {
-        method: Stop::METHOD.to_string(),
-        parameters: Value::Null,
-        oneway: Some(true),
-        more: None,
-        upgrade: None,
-    }) {
+    if let Err(error) = stop_host() {
         println!("Error: failed to stop chewing_tip_host");
         println!("Caused by: {}", error.report());
     }

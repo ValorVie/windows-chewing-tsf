@@ -17,6 +17,29 @@ use crate::ipc::{
     varlink::{MethodCall, MethodReply},
 };
 
+/// Sends only the content-free, one-way Stop request.
+pub fn stop_host() -> Result<(), IpcOpError> {
+    expect_error("Unable to stop chewing_tip_host", || {
+        // ponytail: No attestation is needed for this fixed, content-free Stop; no user text is sent.
+        let mut pipe = DuplexPipeStream::<Bytes>::connect_by_path_with_wait_mode(
+            named_pipe_path()?,
+            interprocess::ConnectWaitMode::Timeout(Duration::from_millis(100)),
+        )?;
+        let call = MethodCall {
+            method: crate::ipc::messages::Stop::METHOD.to_string(),
+            parameters: serde_json::Value::Null,
+            oneway: Some(true),
+            more: None,
+            upgrade: None,
+        };
+        let mut bytes = serde_json::to_vec(&call)?;
+        bytes.push(0);
+        pipe.write_all(&bytes)?;
+        pipe.flush()?;
+        Ok(())
+    })
+}
+
 #[derive(Clone, Default)]
 pub struct ChewingIpcClient {
     pub(super) pipe: Rc<RefCell<Option<DuplexPipeStream<Bytes>>>>,
@@ -221,3 +244,36 @@ impl Drop for ChewingIpcClient {
 }
 
 impl_context_error!(pub IpcOpError);
+
+#[cfg(test)]
+mod stop_tests {
+    use super::*;
+    use std::{sync::mpsc, thread};
+
+    #[test]
+    fn stop_reaches_unsigned_listener_without_a_reply() {
+        // Own the exclusive pipe before sending anything; never stop a real host.
+        let listener = crate::ipc::named_pipe::create_pipe_listener()
+            .expect("test must own the host pipe exclusively");
+        let (release_tx, release_rx) = mpsc::channel();
+        let server = thread::spawn(move || {
+            let pipe = listener.accept().unwrap();
+            let mut frame = Vec::new();
+            let mut reader = BufReader::new(pipe);
+            reader.read_until(0, &mut frame).unwrap();
+            assert_eq!(frame.pop(), Some(0));
+            let call: MethodCall = serde_json::from_slice(&frame).unwrap();
+            assert_eq!(call.method, "im.chewing.ui.Stop");
+            assert_eq!(call.parameters, serde_json::Value::Null);
+            assert_eq!(call.oneway, Some(true));
+            assert_eq!(call.more, None);
+            assert_eq!(call.upgrade, None);
+            // No MethodReply: a one-way Stop must finish without one.
+            let _ = release_rx.recv_timeout(Duration::from_secs(5));
+        });
+        let result = stop_host();
+        let _ = release_tx.send(());
+        assert!(result.is_ok(), "Stop rejected the unsigned test server");
+        server.join().unwrap();
+    }
+}
