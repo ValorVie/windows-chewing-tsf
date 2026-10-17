@@ -3,7 +3,9 @@ use std::mem::transmute;
 use scoped_error::{expect_error, impl_context_error};
 use windows::{
     Win32::{
-        Foundation::{ERROR_INSUFFICIENT_BUFFER, ERROR_NO_TOKEN, HANDLE},
+        Foundation::{
+            CloseHandle, ERROR_INSUFFICIENT_BUFFER, ERROR_NO_TOKEN, HANDLE, HLOCAL, LocalFree,
+        },
         Security::{
             Authorization::ConvertSidToStringSidW, GetTokenInformation, TOKEN_ACCESS_MASK,
             TOKEN_QUERY, TOKEN_USER, TokenUser,
@@ -61,7 +63,14 @@ pub fn get_token_user_sid_string(token: HANDLE) -> Result<String, SandboxError> 
             let sid = token_user.as_ref().unwrap().User.Sid;
             let mut sid_string = PWSTR::null();
             ConvertSidToStringSidW(sid, &mut sid_string)?;
-            Ok(sid_string.to_string()?)
+            let result = sid_string.to_string();
+            // ConvertSidToStringSidW allocates this buffer with LocalAlloc.
+            // Release it even when UTF-16 conversion fails.
+            let freed = LocalFree(Some(HLOCAL(sid_string.0.cast())));
+            if !freed.0.is_null() {
+                return Err("failed to free SID buffer".into());
+            }
+            Ok(result?)
         }
     })
 }
@@ -69,7 +78,10 @@ pub fn get_token_user_sid_string(token: HANDLE) -> Result<String, SandboxError> 
 pub fn get_user_cred() -> Result<UserCred, SandboxError> {
     expect_error("Failed to get user credential", || {
         let token = open_effective_token(TOKEN_QUERY)?;
-        let token_user_sid = get_token_user_sid_string(token)?;
+        let result = get_token_user_sid_string(token);
+        let closed = unsafe { CloseHandle(token) };
+        let token_user_sid = result?;
+        closed?;
         Ok(UserCred { token_user_sid })
     })
 }
