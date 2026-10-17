@@ -6,7 +6,7 @@ description = "新酷音輸入法輔助主程式"
 
 [dependencies]
 anyhow.workspace = true
-chewing.workspace = true
+chewing = { workspace = true, features = ["d512-ort"] }
 chewing_tip_core = { path = "../chewing_tip_core" }
 interprocess = { workspace = true }
 log = { workspace = true, features = ["kv"] }
