@@ -69,6 +69,8 @@ pub struct ChewingTsfConfig {
     pub conv_engine: i32,
     #[serde(default = "default_d512_mode")]
     pub d512_mode: i32,
+    #[serde(default)]
+    pub d512_suggestion_accept_key: i32,
     #[serde(default = "default_d512_weight")]
     pub d512_weight: f64,
     #[serde(default = "default_d512_margin")]
@@ -135,6 +137,7 @@ impl Default for ChewingTsfConfig {
             sel_key_type: 0,
             conv_engine: 1,
             d512_mode: default_d512_mode(),
+            d512_suggestion_accept_key: 0,
             d512_weight: default_d512_weight(),
             d512_margin: default_d512_margin(),
             cand_per_row: 3,
@@ -180,6 +183,14 @@ impl ChewingTsfConfig {
         match self.d512_mode {
             0 => 0,
             _ => default_d512_mode(),
+        }
+    }
+
+    /// Resolves the acceptance key without changing the saved user choice.
+    pub fn effective_d512_suggestion_accept_key(&self) -> i32 {
+        match self.d512_suggestion_accept_key {
+            0..=2 => self.d512_suggestion_accept_key,
+            _ => 0,
         }
     }
 }
@@ -319,6 +330,9 @@ impl Config {
                     0..=2 => value,
                     _ => default_d512_mode(),
                 };
+            }
+            if let Ok(value) = reg_get_i32(&key, "D512SuggestionAcceptKey") {
+                cfg.d512_suggestion_accept_key = value;
             }
             if let Ok(value) = reg_get_f64(&key, "D512Weight") {
                 cfg.d512_weight = value;
@@ -472,6 +486,11 @@ impl Config {
         let _ = reg_set_i32(&key, "SelKeyType", chewing_tsf.sel_key_type);
         let _ = reg_set_i32(&key, "ConvEngine", chewing_tsf.conv_engine);
         let _ = reg_set_i32(&key, "D512Mode", chewing_tsf.d512_mode);
+        let _ = reg_set_i32(
+            &key,
+            "D512SuggestionAcceptKey",
+            chewing_tsf.d512_suggestion_accept_key,
+        );
         let _ = key.set_string("D512Weight", chewing_tsf.d512_weight.to_string());
         let _ = key.set_string("D512Margin", chewing_tsf.d512_margin.to_string());
         let _ = reg_set_i32(&key, "SelAreaLen", chewing_tsf.cand_per_page);

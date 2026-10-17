@@ -190,3 +190,118 @@ fn d512_older_json_uses_defaults_for_new_fields() {
     }
     assert_settings(&serde_json::from_value(value).unwrap(), 1, 0.25, 0.25);
 }
+
+fn assert_accept_key(cfg: &Config, expected: i32) {
+    let value = serde_json::to_value(&cfg.chewing_tsf).unwrap();
+    assert_eq!(value["d512_suggestion_accept_key"], json!(expected));
+}
+
+#[test]
+fn d512_accept_key_defaults_to_tab() {
+    assert_accept_key(&Config::default(), 0);
+}
+
+#[test]
+fn d512_accept_key_missing_registry_value_uses_and_saves_default() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    let cfg = Config::from_reg().unwrap();
+    assert_accept_key(&cfg, 0);
+    assert!(key.get_u32("D512SuggestionAcceptKey").is_err());
+    cfg.save_reg();
+    assert_eq!(key.get_u32("D512SuggestionAcceptKey").unwrap(), 0);
+}
+
+#[test]
+fn d512_accept_key_older_json_uses_default() {
+    let mut value = serde_json::to_value(Config::default()).unwrap();
+    value["chewing_tsf"]
+        .as_object_mut()
+        .unwrap()
+        .remove("d512_suggestion_accept_key");
+    assert_accept_key(&serde_json::from_value(value).unwrap(), 0);
+}
+
+#[test]
+fn d512_accept_key_registry_choices_survive_unrelated_save() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for stored in [0, 1, 2] {
+        key.set_u32("D512SuggestionAcceptKey", stored).unwrap();
+        let mut cfg = Config::from_reg().unwrap();
+        assert_accept_key(&cfg, stored as i32);
+        cfg.chewing_tsf.font_size = 18;
+        cfg.save_reg();
+        assert_eq!(key.get_u32("D512SuggestionAcceptKey").unwrap(), stored);
+    }
+}
+
+#[test]
+fn d512_accept_key_save_writes_the_selected_dword() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for stored in [0, 1, 2] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["d512_suggestion_accept_key"] = json!(stored);
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        cfg.save_reg();
+        assert_eq!(key.get_u32("D512SuggestionAcceptKey").unwrap(), stored);
+        assert_accept_key(&Config::from_reg().unwrap(), stored as i32);
+    }
+}
+
+#[test]
+fn d512_accept_key_out_of_range_dwords_are_preserved() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for stored in [3, 42, i32::MAX as u32, 0x8000_0000, u32::MAX] {
+        key.set_u32("D512SuggestionAcceptKey", stored).unwrap();
+        let mut cfg = Config::from_reg().unwrap();
+        assert_accept_key(&cfg, stored as i32);
+        assert_eq!(key.get_u32("D512SuggestionAcceptKey").unwrap(), stored);
+        cfg.chewing_tsf.font_size = 19;
+        cfg.save_reg();
+        assert_eq!(key.get_u32("D512SuggestionAcceptKey").unwrap(), stored);
+        assert_accept_key(&Config::from_reg().unwrap(), stored as i32);
+    }
+}
+
+#[test]
+fn d512_accept_key_wrong_registry_type_uses_default_without_writing() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_string("D512SuggestionAcceptKey", "1").unwrap();
+    assert_accept_key(&Config::from_reg().unwrap(), 0);
+    assert_eq!(key.get_string("D512SuggestionAcceptKey").unwrap(), "1");
+}
+
+#[test]
+fn d512_accept_key_effective_value_does_not_rewrite_user_choice() {
+    let mut cfg = Config::default();
+    for mode in [0, 1, 2] {
+        cfg.chewing_tsf.d512_mode = mode;
+        for (stored, effective) in [
+            (0, 0),
+            (1, 1),
+            (2, 2),
+            (3, 0),
+            (42, 0),
+            (i32::MAX, 0),
+            (i32::MIN, 0),
+            (-1, 0),
+        ] {
+            cfg.chewing_tsf.d512_suggestion_accept_key = stored;
+            assert_eq!(
+                cfg.chewing_tsf.effective_d512_suggestion_accept_key(),
+                effective
+            );
+            assert_accept_key(&cfg, stored);
+            assert_eq!(cfg.chewing_tsf.d512_mode, mode);
+        }
+    }
+}
