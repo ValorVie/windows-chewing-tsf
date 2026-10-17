@@ -1,0 +1,157 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+
+#![cfg(windows)]
+
+use std::sync::Mutex;
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use chewing_tip_core::config::Config;
+use serde_json::json;
+use windows::Win32::System::Registry::{HKEY, HKEY_CURRENT_USER, RegOverridePredefKey};
+use windows_registry::{CURRENT_USER, Key};
+
+// HKCU overrides affect this test process, so all registry tests share this lock.
+static REGISTRY_LOCK: Mutex<()> = Mutex::new(());
+
+struct IsolatedRegistry {
+    original_user: Key,
+    root: Key,
+    path: String,
+    overridden: bool,
+}
+
+impl IsolatedRegistry {
+    fn new() -> Self {
+        let original_user = CURRENT_USER.options().read().write().open("").unwrap();
+        let path = format!(
+            "Software\\ChewingTsfConfigTest-{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        );
+        let root = original_user.create(&path).unwrap();
+        let mut registry = Self {
+            original_user,
+            root,
+            path,
+            overridden: false,
+        };
+        // Keep production from_reg/save_reg calls inside this temporary subtree.
+        unsafe {
+            RegOverridePredefKey(HKEY_CURRENT_USER, Some(HKEY(registry.root.as_raw())))
+                .ok()
+                .unwrap();
+        }
+        registry.overridden = true;
+        CURRENT_USER.create("Software\\ChewingTextService").unwrap();
+        registry
+    }
+
+    fn settings(&self) -> Key {
+        self.root.create("Software\\ChewingTextService").unwrap()
+    }
+}
+
+impl Drop for IsolatedRegistry {
+    fn drop(&mut self) {
+        if self.overridden {
+            unsafe { RegOverridePredefKey(HKEY_CURRENT_USER, None).ok().unwrap() };
+        }
+        self.original_user.remove_tree(&self.path).unwrap();
+    }
+}
+
+fn assert_settings(cfg: &Config, mode: i32, weight: f64, margin: f64) {
+    let value = serde_json::to_value(&cfg.chewing_tsf).unwrap();
+    assert_eq!(value["d512_mode"], json!(mode));
+    assert_eq!(value["d512_weight"], json!(weight));
+    assert_eq!(value["d512_margin"], json!(margin));
+}
+
+#[test]
+fn d512_default_fields_exist() {
+    assert_settings(&Config::default(), 1, 0.25, 0.25);
+}
+
+#[test]
+fn d512_missing_registry_values_use_and_save_defaults() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    assert_settings(&Config::from_reg().unwrap(), 1, 0.25, 0.25);
+
+    Config::default().save_reg();
+    let key = registry.settings();
+    assert_eq!(key.get_u32("D512Mode").unwrap(), 1);
+    assert_eq!(key.get_string("D512Weight").unwrap(), "0.25");
+    assert_eq!(key.get_string("D512Margin").unwrap(), "0.25");
+}
+
+#[test]
+fn d512_modes_include_phase_one_suggestion_fallback() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_string("D512Weight", "0.5").unwrap();
+    key.set_string("D512Margin", "0.125").unwrap();
+
+    for (stored, effective) in [(0, 0), (1, 1), (2, 1), (3, 1), (u32::MAX, 1)] {
+        key.set_u32("D512Mode", stored).unwrap();
+        assert_settings(&Config::from_reg().unwrap(), effective, 0.5, 0.125);
+    }
+}
+
+#[test]
+fn d512_save_uses_dword_mode_and_decimal_strings() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+
+    for (stored, effective) in [(0, 0), (1, 1), (2, 1)] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["d512_mode"] = json!(stored);
+        value["chewing_tsf"]["d512_weight"] = json!(0.75);
+        value["chewing_tsf"]["d512_margin"] = json!(0.125);
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        cfg.save_reg();
+
+        assert_eq!(key.get_u32("D512Mode").unwrap(), stored);
+        assert_eq!(key.get_string("D512Weight").unwrap(), "0.75");
+        assert_eq!(key.get_string("D512Margin").unwrap(), "0.125");
+        assert_settings(&Config::from_reg().unwrap(), effective, 0.75, 0.125);
+    }
+}
+
+#[test]
+fn d512_invalid_values_fall_back_independently() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_u32("D512Mode", 0).unwrap();
+
+    for invalid in ["", "invalid", "NaN", "inf", "-inf", "1e999"] {
+        key.set_string("D512Weight", invalid).unwrap();
+        key.set_string("D512Margin", "0.375").unwrap();
+        assert_settings(&Config::from_reg().unwrap(), 0, 0.25, 0.375);
+
+        key.set_string("D512Weight", "0.625").unwrap();
+        key.set_string("D512Margin", invalid).unwrap();
+        assert_settings(&Config::from_reg().unwrap(), 0, 0.625, 0.25);
+    }
+
+    key.set_string("D512Mode", "0").unwrap();
+    key.set_u32("D512Weight", 1).unwrap();
+    key.set_u64("D512Margin", 1).unwrap();
+    assert_settings(&Config::from_reg().unwrap(), 1, 0.25, 0.25);
+}
+
+#[test]
+fn d512_older_json_uses_defaults_for_new_fields() {
+    let mut value = serde_json::to_value(Config::default()).unwrap();
+    let fields = value["chewing_tsf"].as_object_mut().unwrap();
+    for field in ["d512_mode", "d512_weight", "d512_margin"] {
+        fields.remove(field);
+    }
+    assert_settings(&serde_json::from_value(value).unwrap(), 1, 0.25, 0.25);
+}
