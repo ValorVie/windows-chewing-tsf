@@ -5,6 +5,8 @@ edition = "2024"
 license = "GPL-3.0-or-later"
 
 [dependencies]
+roxmltree = "0.21.1"
+sha2 = "0.10.9"
 indoc = "2.0.5"
 jiff = { version = "0.2.0", default-features = false, features = ["std"] }
 rpgpie-sop = "0.10.0"

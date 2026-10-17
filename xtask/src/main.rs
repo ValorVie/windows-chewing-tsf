@@ -4,11 +4,13 @@ use scoped_error::{Error, expect_error};
 
 mod download;
 mod installer;
+mod payload;
 mod version;
 mod zip;
 
 mod flags {
     use super::installer::Target;
+    use std::path::PathBuf;
 
     xflags::xflags! {
         src "src/main.rs"
@@ -34,6 +36,8 @@ mod flags {
                 optional --release
                 /// Build nightly artifact
                 optional --nightly
+                /// Build the x64 fork variant without ARM64 DLLs.
+                optional --without-arm64
             }
             /// Download prebuilt components and verify the signatures.
             cmd download-components {
@@ -41,7 +45,21 @@ mod flags {
             }
             /// Build the MSI package
             cmd package-installer {
-
+                /// Package the x64 fork variant without ARM64 DLLs.
+                optional --without-arm64
+            }
+            /// Verify and copy immutable D512 and ORT assets beside the host.
+            cmd stage-d512 {
+                required --from DIRECTORY: PathBuf
+            }
+            /// Verify and copy the selected preferences artifact.
+            cmd stage-preferences {
+                required --from EXECUTABLE: PathBuf
+                required --sha256 SHA256: String
+            }
+            /// Check every active MSI source plus D512 hashes and placement.
+            cmd check-installer {
+                optional --without-arm64
             }
         }
     }
@@ -59,6 +77,9 @@ mod flags {
         BuildInstaller(BuildInstaller),
         DownloadComponents(DownloadComponents),
         PackageInstaller(PackageInstaller),
+        StageD512(StageD512),
+        StagePreferences(StagePreferences),
+        CheckInstaller(CheckInstaller),
     }
 
     #[derive(Debug)]
@@ -74,13 +95,32 @@ mod flags {
         pub target: Option<Target>,
         pub release: bool,
         pub nightly: bool,
+        pub without_arm64: bool,
     }
 
     #[derive(Debug)]
     pub struct DownloadComponents;
 
     #[derive(Debug)]
-    pub struct PackageInstaller;
+    pub struct PackageInstaller {
+        pub without_arm64: bool,
+    }
+
+    #[derive(Debug)]
+    pub struct StageD512 {
+        pub from: PathBuf,
+    }
+
+    #[derive(Debug)]
+    pub struct StagePreferences {
+        pub from: PathBuf,
+        pub sha256: String,
+    }
+
+    #[derive(Debug)]
+    pub struct CheckInstaller {
+        pub without_arm64: bool,
+    }
 
     impl Xtask {
         #[allow(dead_code)]
@@ -117,6 +157,13 @@ fn main() -> Result<(), Error> {
             }
             flags::XtaskCmd::PackageInstaller(flags) => {
                 installer::package_installer(flags)?;
+            }
+            flags::XtaskCmd::StageD512(flags) => payload::stage_d512(&flags.from)?,
+            flags::XtaskCmd::StagePreferences(flags) => {
+                payload::stage_preference_artifact(&flags.from, &flags.sha256)?
+            }
+            flags::XtaskCmd::CheckInstaller(flags) => {
+                payload::check_installer(flags.without_arm64)?
             }
         }
 

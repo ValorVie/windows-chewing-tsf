@@ -1,10 +1,16 @@
 <?xml version="1.0" encoding="UTF-8"?>
 
 <?include version.wxi?>
+<?ifndef IncludeArm64?>
+<?define IncludeArm64 = "yes"?>
+<?endif?>
 
 <Wix xmlns="http://wixtoolset.org/schemas/v4/wxs" xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" xmlns:util="http://wixtoolset.org/schemas/v4/wxs/util">
     <Package Name="新酷音輸入法 (TSF)" Codepage="65001" Language="1028" Manufacturer="新酷音輸入法開發團隊" Version="$(var.Version)" UpgradeStrategy="majorUpgrade" UpgradeCode="8085e4ce-205d-4c44-9450-59ba34163b2a">
         <MajorUpgrade AllowDowngrades="yes" />
+        <?if $(var.IncludeArm64) = "no" ?>
+        <Launch Condition="PROCESSOR_ARCHITECTURE = &quot;AMD64&quot;" Message="This fork build supports x64 Windows only." />
+        <?endif?>
         <MediaTemplate CompressionLevel="high" EmbedCab="yes" />
         <Property Id="PROCESSOR_ARCHITECTURE" Secure="yes">
             <RegistrySearch Id="ProcessorArchitectureValue" Type="raw" Root="HKLM" Key="System\CurrentControlSet\Control\Session Manager\Environment" Name="PROCESSOR_ARCHITECTURE" />
@@ -36,6 +42,20 @@
                 <File Source="WebView2Loader.dll" Bitness="always64" />
                 <File Source="chewing-cli.exe" Bitness="always64" />
                 <File Source="chewing_tip_host.exe" Bitness="always64" />
+                <File Source="model.onnx" Bitness="always64" />
+                <File Source="vocab.json" Bitness="always64" />
+                <File Source="manifest.json" Bitness="always64" />
+                <File Source="onnxruntime.dll" Bitness="always64" />
+                <File Source="onnxruntime_providers_shared.dll" Bitness="always64" />
+                <File Source="D512-LICENSE.txt" Bitness="always64" />
+                <File Source="ORT-LICENSE.txt" Bitness="always64" />
+                <File Source="ORT-ThirdPartyNotices.txt" Bitness="always64" />
+                <File Id="ChewingTipX64" Source="x64\chewing_tip_x64.dll" Bitness="always64" />
+                <File Id="ChewingTipX86" Source="x86\chewing_tip.dll" Name="chewing_tip_x86.dll" Bitness="always64" />
+                <?if $(var.IncludeArm64) = "yes" ?>
+                <File Id="ChewingTipArm64X" Source="x64\chewing_tip.dll" Bitness="always64" />
+                <File Id="ChewingTipArm64" Source="x64\chewing_tip_arm64.dll" Bitness="always64" />
+                <?endif?>
                 <File Source="chewing.ico" />
                 <File Source="version.json" />
                 <Component Bitness="always64">
@@ -101,21 +121,20 @@
             </Directory>
         </StandardDirectory>
         <StandardDirectory Id="System64Folder">
-            <File Id="ChewingTipArm64X" Source="x64\chewing_tip.dll" Bitness="always64" />
-            <File Id="ChewingTipArm64" Source="x64\chewing_tip_arm64.dll" Bitness="always64" />
-            <File Id="ChewingTipX64" Source="x64\chewing_tip_x64.dll" Bitness="always64" />
             <Component Guid="fd558430-35f7-49b5-8408-b42befcb4f32" Id="ServerChewingTipX64" Condition="PROCESSOR_ARCHITECTURE = &quot;AMD64&quot;">
                 <Class Advertise="no" Context="InprocServer32" Description="新酷音輸入法 (TSF)" Id="13F2EF08-575C-4D8C-88E0-F67BB8052B84" IconIndex="0" ThreadingModel="apartment" Server="ChewingTipX64" />
             </Component>
+            <?if $(var.IncludeArm64) = "yes" ?>
             <Component Guid="010d3ae4-e059-4dbd-be9a-411548e8f869" Id="ServerChewingTipArm64X" Condition="PROCESSOR_ARCHITECTURE = &quot;ARM64&quot;">
                 <Class Advertise="no" Context="InprocServer32" Description="新酷音輸入法 (TSF)" Id="13F2EF08-575C-4D8C-88E0-F67BB8052B84" IconIndex="0" ThreadingModel="apartment" Server="ChewingTipArm64X" />
             </Component>
+            <?endif?>
         </StandardDirectory>
         <StandardDirectory Id="SystemFolder">
-            <Component Bitness="always32">
-                <File Source="x86\chewing_tip.dll">
-                    <Class Advertise="no" Context="InprocServer32" Description="新酷音輸入法 (TSF)" Id="13F2EF08-575C-4D8C-88E0-F67BB8052B84" IconIndex="0" ThreadingModel="apartment" />
-                </File>
+            <!-- Registry-only component stays in a 32-bit directory (ICE80).
+                 Its server file is installed beside the host in Program Files. -->
+            <Component Id="ServerChewingTipX86" Guid="b3e6bf95-aebd-4aa6-951e-cc5733143e60" Bitness="always32">
+                <Class Advertise="no" Context="InprocServer32" Description="新酷音輸入法 (TSF)" Id="13F2EF08-575C-4D8C-88E0-F67BB8052B84" IconIndex="0" ThreadingModel="apartment" Server="ChewingTipX86" />
             </Component>
         </StandardDirectory>
         <Icon Id="icon.exe" SourceFile="chewing.ico" />

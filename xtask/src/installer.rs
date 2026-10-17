@@ -2,8 +2,8 @@
 
 use std::{path::PathBuf, str::FromStr};
 
-use scoped_error::{expect_error, Error};
-use xshell::{cmd, Shell};
+use scoped_error::{Error, expect_error};
+use xshell::{Shell, cmd};
 
 use crate::flags::{BuildInstaller, PackageInstaller};
 
@@ -104,7 +104,7 @@ pub(crate) fn build_installer(flags: BuildInstaller) -> Result<(), Error> {
             )
             .run()?;
         }
-        {
+        if !flags.without_arm64 {
             cmd!(
                 sh,
                 "cargo build -p chewing_tip {release...} --target {aarch64_target}"
@@ -122,11 +122,7 @@ pub(crate) fn build_installer(flags: BuildInstaller) -> Result<(), Error> {
         sh.create_dir("build/installer")?;
         {
             let _p = sh.push_dir("installer");
-            for file in [
-                "windows-chewing-tsf.wxs",
-                "version.wxi",
-                "version.json",
-            ] {
+            for file in ["windows-chewing-tsf.wxs", "version.wxi", "version.json"] {
                 sh.copy_file(file, "../build/installer")?;
             }
         }
@@ -147,18 +143,20 @@ pub(crate) fn build_installer(flags: BuildInstaller) -> Result<(), Error> {
             format!("{}/chewing_tip.pdb", x86_64_target_dir.display()),
             "build/installer/x64/chewing_tip_x64.pdb",
         );
-        sh.copy_file(
-            format!("{}/chewing_tip.dll", aarch64_target_dir.display()),
-            "build/installer/x64/chewing_tip_arm64.dll",
-        )?;
-        let _ = sh.copy_file(
-            format!("{}/chewing_tip.dll", aarch64_target_dir.display()),
-            "build/installer/x64/chewing_tip_arm64.pdb",
-        );
-        sh.copy_file(
-            "platform/arm64x/chewing_tip.dll",
-            "build/installer/x64/chewing_tip.dll",
-        )?;
+        if !flags.without_arm64 {
+            sh.copy_file(
+                format!("{}/chewing_tip.dll", aarch64_target_dir.display()),
+                "build/installer/x64/chewing_tip_arm64.dll",
+            )?;
+            let _ = sh.copy_file(
+                format!("{}/chewing_tip.dll", aarch64_target_dir.display()),
+                "build/installer/x64/chewing_tip_arm64.pdb",
+            );
+            sh.copy_file(
+                "platform/arm64x/chewing_tip.dll",
+                "build/installer/x64/chewing_tip.dll",
+            )?;
+        }
         for file in ["chewing_tip_host.exe", "tsfreg.exe"] {
             sh.copy_file(
                 format!("{}/{file}", x86_64_target_dir.display()),
@@ -185,16 +183,22 @@ pub(crate) fn build_installer(flags: BuildInstaller) -> Result<(), Error> {
     })
 }
 
-pub(crate) fn package_installer(_flags: PackageInstaller) -> Result<(), Error> {
+pub(crate) fn package_installer(flags: PackageInstaller) -> Result<(), Error> {
     expect_error("Failed to package installer", || {
         let sh = Shell::new()?;
 
+        crate::payload::check_installer(flags.without_arm64)?;
+        let include_arm64 = if flags.without_arm64 {
+            "IncludeArm64=no"
+        } else {
+            "IncludeArm64=yes"
+        };
         sh.create_dir("dist")?;
         {
             let _p = sh.push_dir("build/installer");
             cmd!(
                 sh,
-                "wix build -acceptEula wix7 -arch x64 -culture zh-TW
+                "wix build -arch x64 -culture zh-TW -d {include_arm64}
                     -o ../../dist/windows-chewing-tsf-unsigned.msi -pdbtype none
                     windows-chewing-tsf.wxs"
             )

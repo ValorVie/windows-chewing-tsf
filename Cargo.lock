@@ -3302,8 +3302,10 @@ version = "0.1.0"
 dependencies = [
  "indoc",
  "jiff",
+ "roxmltree",
  "rpgpie-sop",
  "scoped-error",
+ "sha2",
  "sop",
  "xflags",
  "xshell",
