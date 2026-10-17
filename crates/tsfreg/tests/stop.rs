@@ -70,3 +70,11 @@ fn absent_host_keeps_best_effort_exit_status() {
         "no host is normal during installation"
     );
 }
+
+#[cfg(feature = "test-ipc")]
+#[test]
+fn test_pipe_feature_is_explicitly_isolated() {
+    let id = std::env::var("CHEWING_TEST_PIPE_ID").expect("isolated test pipe ID");
+    let path = chewing_tip_core::ipc::named_pipe::named_pipe_path().unwrap();
+    assert!(path.ends_with(&format!(".test-{id}")));
+}

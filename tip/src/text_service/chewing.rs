@@ -1402,6 +1402,7 @@ impl ChewingTextService {
                 bg_color: color_s(&self.cfg.chewing_tsf.notify_bg_color),
                 border_color: color_s(&self.cfg.chewing_tsf.notify_border_color),
                 max_text_width: None,
+                ..Default::default()
             });
             if let Ok(rect) = self.get_selection_rect(context) {
                 notification.set_position(rect.left + 50, rect.bottom + 50);

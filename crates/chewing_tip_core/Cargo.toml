@@ -33,3 +33,7 @@ windows = { version = "0.62.2", features = [
   "Win32_System_Threading"
 ] }
 windows-registry = "0.6.1"
+
+[features]
+# Explicitly isolated IPC for tests that spawn the normal CLI binary.
+test-ipc = []

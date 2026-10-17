@@ -11,7 +11,7 @@ use anyhow::{Context, Result};
 use log::error;
 use scoped_error::expect_error;
 use windows::Win32::{
-    Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, TRUE, WPARAM},
+    Foundation::{E_FAIL, HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, TRUE, WPARAM},
     Graphics::{
         Direct2D::{
             Common::{D2D_RECT_F, D2D1_COLOR_F},
@@ -27,7 +27,10 @@ use windows::Win32::{
         Dxgi::{
             Common::DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_PRESENT, DXGI_SWAP_CHAIN_FLAG, IDXGISwapChain1,
         },
-        Gdi::{BeginPaint, EndPaint, PAINTSTRUCT},
+        Gdi::{
+            BeginPaint, EndPaint, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO,
+            MonitorFromPoint, PAINTSTRUCT,
+        },
     },
     UI::{
         TextServices::{ITfThreadMgr, ITfUIElement, ITfUIElement_Impl, ITfUIElementMgr},
@@ -58,6 +61,8 @@ use crate::{
 
 use super::message_box::draw_message_box;
 
+mod mac_hint;
+
 const ID_TIMEOUT: usize = 1;
 
 #[implement(ITfUIElement)]
@@ -82,6 +87,8 @@ pub(crate) struct NotificationModel {
     pub(crate) bg_color: D2D1_COLOR_F,
     pub(crate) border_color: D2D1_COLOR_F,
     pub(crate) max_text_width: Option<f32>,
+    pub(crate) hint_style: Option<mac_hint::Style>,
+    pub(crate) hint_anchor: Option<POINT>,
 }
 
 extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -119,11 +126,28 @@ extern "system" fn wnd_proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM
             if let Some(pos) = unsafe { pos.as_mut() } {
                 let view = this.view.borrow();
                 let model = this.model.borrow();
-                let dpi = get_dpi_for_point(POINT { x: pos.x, y: pos.y });
+                let dpi = get_dpi_for_point(geometry_anchor(&model, POINT { x: pos.x, y: pos.y }));
                 if let Ok(size) = view.calculate_client_rect(&model, dpi) {
                     pos.cx = size.hw_width as i32;
                     pos.cy = size.hw_height as i32;
-                    (pos.x, pos.y) = clamp_point_to_monitor(pos.x, pos.y, pos.cx, pos.cy);
+                    (pos.x, pos.y) = if model.hint_style.is_some() {
+                        clamp_hint_window(&model, pos.x, pos.y, pos.cx, pos.cy, |anchor| {
+                            let mut info = MONITORINFO {
+                                cbSize: size_of::<MONITORINFO>() as u32,
+                                ..Default::default()
+                            };
+                            unsafe {
+                                GetMonitorInfoW(
+                                    MonitorFromPoint(anchor, MONITOR_DEFAULTTONEAREST),
+                                    &mut info,
+                                )
+                            }
+                            .as_bool()
+                            .then_some(info.rcWork)
+                        })
+                    } else {
+                        clamp_point_to_monitor(pos.x, pos.y, pos.cx, pos.cy)
+                    };
                 }
             }
             LRESULT(0)
@@ -212,45 +236,7 @@ impl View {
     ) -> Result<RenderedMetrics> {
         match self {
             View::Dummy => Ok(RenderedMetrics::default()),
-            View::Rendered { dwrite_factory, .. } => {
-                let scale = dpi / 96.0;
-                let text_format = unsafe {
-                    dwrite_factory.CreateTextFormat(
-                        &model.font_family,
-                        None,
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        model.font_size,
-                        w!("zh-TW"),
-                    )?
-                };
-                let text_layout = unsafe {
-                    dwrite_factory.CreateTextLayout(
-                        &model.text,
-                        &text_format,
-                        model.max_text_width.unwrap_or(f32::MAX),
-                        f32::MAX,
-                    )?
-                };
-                let mut metrics = DWRITE_TEXT_METRICS::default();
-                unsafe { text_layout.GetMetrics(&mut metrics)? };
-
-                let margin = 10.0;
-                let width = metrics.width + margin * 2.0;
-                let height = metrics.height + margin * 2.0;
-
-                // Convert to HW pixels
-                let hw_width = (width * scale + 25.0).ceil();
-                let hw_height = (height * scale + 25.0).ceil();
-
-                Ok(RenderedMetrics {
-                    width,
-                    height,
-                    hw_width,
-                    hw_height,
-                })
-            }
+            View::Rendered { dwrite_factory, .. } => measure_model(dwrite_factory, model, dpi),
         }
     }
 
@@ -267,19 +253,10 @@ impl View {
                 if model.text.is_empty() {
                     return Ok(());
                 }
-                let text_format = unsafe {
-                    dwrite_factory.CreateTextFormat(
-                        &model.font_family,
-                        None,
-                        DWRITE_FONT_WEIGHT_NORMAL,
-                        DWRITE_FONT_STYLE_NORMAL,
-                        DWRITE_FONT_STRETCH_NORMAL,
-                        model.font_size,
-                        w!("zh-TW"),
-                    )?
-                };
 
-                let dpi = get_dpi_for_window(window.hwnd());
+                let dpi = model
+                    .hint_anchor
+                    .map_or_else(|| get_dpi_for_window(window.hwnd()), get_dpi_for_point);
                 let RenderedMetrics {
                     width,
                     height,
@@ -304,32 +281,7 @@ impl View {
                 unsafe {
                     dc.BeginDraw();
 
-                    draw_message_box(
-                        dc,
-                        0.0,
-                        0.0,
-                        width,
-                        height,
-                        model.bg_color,
-                        model.border_color,
-                    )?;
-
-                    let margin = 10.0;
-                    let text_rect = D2D_RECT_F {
-                        left: margin,
-                        top: margin,
-                        right: width - margin,
-                        bottom: height - margin,
-                    };
-                    let brush = dc.CreateSolidColorBrush(&model.fg_color, None)?;
-                    dc.DrawText(
-                        &model.text,
-                        &text_format,
-                        &text_rect,
-                        &brush,
-                        D2D1_DRAW_TEXT_OPTIONS_NONE,
-                        DWRITE_MEASURING_MODE_NATURAL,
-                    );
+                    paint_model(dc, dwrite_factory, model, width, height)?;
                     dc.EndDraw(None, None)?;
 
                     // Present the draw buffer
@@ -476,4 +428,128 @@ impl ITfUIElement_Impl for Notification_Impl {
     fn IsShown(&self) -> WindowsResult<BOOL> {
         Ok(self.inner.view.borrow().window().is_some().into())
     }
+}
+
+fn measure_model(
+    dwrite_factory: &IDWriteFactory1,
+    model: &NotificationModel,
+    dpi: f32,
+) -> Result<RenderedMetrics> {
+    let scale = dpi / 96.0;
+    let text_format = unsafe {
+        dwrite_factory.CreateTextFormat(
+            &model.font_family,
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            model.font_size,
+            w!("zh-TW"),
+        )?
+    };
+    let text_layout = unsafe {
+        dwrite_factory.CreateTextLayout(
+            &model.text,
+            &text_format,
+            model.max_text_width.unwrap_or(f32::MAX),
+            f32::MAX,
+        )?
+    };
+    let mut metrics = DWRITE_TEXT_METRICS::default();
+    unsafe { text_layout.GetMetrics(&mut metrics)? };
+
+    let margin = model.hint_style.map_or(10., |style| style.padding);
+    let width = metrics.width + margin * 2.0;
+    let height = metrics.height + margin * 2.0;
+
+    // Convert to HW pixels
+    let (hw_width, hw_height) = if let Some(style) = model.hint_style {
+        (
+            ((width + style.shadow * 2.) * scale).ceil(),
+            ((height + style.shadow * 2.) * scale).ceil(),
+        )
+    } else {
+        ((width * scale + 25.).ceil(), (height * scale + 25.).ceil())
+    };
+
+    Ok(RenderedMetrics {
+        width,
+        height,
+        hw_width,
+        hw_height,
+    })
+}
+fn paint_model(
+    dc: &ID2D1DeviceContext,
+    dwrite_factory: &IDWriteFactory1,
+    model: &NotificationModel,
+    width: f32,
+    height: f32,
+) -> Result<()> {
+    let text_format = unsafe {
+        dwrite_factory.CreateTextFormat(
+            &model.font_family,
+            None,
+            DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL,
+            DWRITE_FONT_STRETCH_NORMAL,
+            model.font_size,
+            w!("zh-TW"),
+        )?
+    };
+    unsafe {
+        let (margin, offset) = if let Some(style) = model.hint_style {
+            mac_hint::draw_bubble(dc, style, width, height, model.bg_color)?;
+            (style.padding, style.shadow)
+        } else {
+            draw_message_box(
+                dc,
+                0.,
+                0.,
+                width,
+                height,
+                model.bg_color,
+                model.border_color,
+            )?;
+            (10., 0.)
+        };
+        let text_rect = D2D_RECT_F {
+            left: offset + margin,
+            top: offset + margin,
+            right: offset + width - margin,
+            bottom: offset + height - margin,
+        };
+        let brush = dc.CreateSolidColorBrush(&model.fg_color, None)?;
+        dc.DrawText(
+            &model.text,
+            &text_format,
+            &text_rect,
+            &brush,
+            D2D1_DRAW_TEXT_OPTIONS_NONE,
+            DWRITE_MEASURING_MODE_NATURAL,
+        );
+    }
+    Ok(())
+}
+
+fn geometry_anchor(model: &NotificationModel, origin: POINT) -> POINT {
+    model.hint_anchor.unwrap_or(origin)
+}
+
+fn clamp_hint_window(
+    model: &NotificationModel,
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+    work_area: impl FnOnce(POINT) -> Option<RECT>,
+) -> (i32, i32) {
+    let anchor = geometry_anchor(model, POINT { x, y });
+    let Some(work) = work_area(anchor) else {
+        return (x, y);
+    };
+    (
+        x.clamp(work.left, (work.right - width).max(work.left)),
+        y.clamp(work.top, (work.bottom - height).max(work.top)),
+    )
 }

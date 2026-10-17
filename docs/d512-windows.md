@@ -91,6 +91,16 @@ It does not display or diff the full winning sentence; acceptance still uses
 that complete proposal. Only the pure Ctrl prefix of configured
 Ctrl+Tab preserves the hint; other keys withdraw it.
 
+Suggestion bubbles follow Mac TooltipUI's normal appearance. The app theme
+selects a charcoal RGB (0.18, 0.18, 0.18) background with white text in dark mode;
+light mode swaps those colors. Unknown or missing app theme uses light mode.
+The regular Windows message font is read at 96 DPI: text size is at least
+12 DIPs or one DIP above that font's size, and padding is half the base size,
+rounded up. The bubble has a 7-DIP radius, a soft shadow, and a 4-DIP gap below
+the composition caret. The shadow margin is excluded from caret alignment.
+Existing monitor clamping applies. General notification colors, font and
+geometry remain separate.
+
 Hints reuse Notification with an independent owner and no timeout. UI suppression
 by TSF is respected. Acceptance requires a visible current hint, a fresh engine
 report, matching TSF context/composition, and a synchronous read of the actual
@@ -157,3 +167,18 @@ the same option. The x64-only MSI rejects ARM64 Windows.
 WiX 7 must already be installed and its OSMF EULA accepted by the user. These
 commands do not accept the EULA automatically. Packaging creates
 `dist/windows-chewing-tsf-unsigned.msi`; it does not sign or install it.
+
+## Tests with an installed host
+
+Core unit tests use a process-specific pipe. To run the full workspace while
+an installed host is active, set `CHEWING_TEST_PIPE_ID` to a unique ASCII
+alphanumeric or hyphenated ID (1 to 64 bytes), then use:
+
+```powershell
+cargo test --locked --workspace --features tsfreg/test-ipc --target x86_64-pc-windows-msvc
+```
+
+The explicit `test-ipc` feature lets the Stop integration listener and its CLI
+child share that private pipe. A missing or invalid ID is an error. This feature
+cannot compile in Release; normal product builds keep the installed host's
+original pipe path. The tests do not stop the installed host.

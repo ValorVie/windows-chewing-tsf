@@ -27,6 +27,9 @@ use super::server_trust::attest_server;
 use crate::ipc::IpcError;
 use crate::sandbox::get_user_cred;
 
+#[cfg(all(feature = "test-ipc", not(debug_assertions)))]
+compile_error!("test-ipc is restricted to debug test builds");
+
 pub const NAMED_PIPE_PATH_BASE: &str = r"\\.\pipe\chewing.";
 
 pub fn named_pipe_path() -> Result<String, IpcError> {
@@ -34,7 +37,24 @@ pub fn named_pipe_path() -> Result<String, IpcError> {
         let user_cred = get_user_cred()?;
         let mut hasher = FnvHasher::default();
         hasher.write(user_cred.token_user_sid.as_bytes());
-        Ok(format!("{NAMED_PIPE_PATH_BASE}{:x}.pipe", hasher.finish()))
+        let path = format!("{NAMED_PIPE_PATH_BASE}{:x}.pipe", hasher.finish());
+        // Unit tests must never connect to or displace an installed user's host.
+        #[cfg(test)]
+        let path = format!("{path}.test-{}", std::process::id());
+        #[cfg(all(feature = "test-ipc", not(test)))]
+        let path = {
+            // CLI integration tests share one explicit ID with their child.
+            // Missing or malformed IDs fail closed instead of using the real host.
+            let id = std::env::var("CHEWING_TEST_PIPE_ID")?;
+            if id.is_empty()
+                || id.len() > 64
+                || !id.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+            {
+                return Err("invalid test pipe ID".into());
+            }
+            format!("{path}.test-{id}")
+        };
+        Ok(path)
     })
 }
 
@@ -145,4 +165,13 @@ pub fn verify_trust(path: &Path) -> bool {
     }
 
     status == S_OK.0
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn named_pipe_test_path_is_process_private() {
+        let path = super::named_pipe_path().unwrap();
+        assert!(path.ends_with(&format!(".test-{}", std::process::id())));
+    }
 }

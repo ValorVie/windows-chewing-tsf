@@ -123,7 +123,7 @@ use super::{
     edit_session::{CompositionApplied, read_suggestion_document},
     ui_elements::{Notification, NotificationModel},
 };
-use crate::ui::gfx::{color_s, get_dpi_for_point};
+use crate::ui::gfx::get_dpi_for_point;
 use chewing_tip_core::config::ChewingTsfConfig;
 use windows::{
     Win32::{
@@ -181,19 +181,11 @@ pub(super) fn publication(
 ) -> CompositionApplied {
     let epoch = slot.epoch.get();
     let slot = Rc::downgrade(slot);
-    let model = NotificationModel {
-        text: HSTRING::from(hint_text(
-            &proposal,
-            simplified,
-            cfg.effective_d512_suggestion_accept_key(),
-        )),
-        font_family: HSTRING::from(&cfg.font_family),
-        font_size: cfg.font_size as f32,
-        fg_color: color_s(&cfg.notify_fg_color),
-        bg_color: color_s(&cfg.notify_bg_color),
-        border_color: color_s(&cfg.notify_border_color),
-        max_text_width: None,
-    };
+    let text = HSTRING::from(hint_text(
+        &proposal,
+        simplified,
+        cfg.effective_d512_suggestion_accept_key(),
+    ));
     Rc::new(move |ec, composition| {
         let Some(slot) = slot.upgrade() else {
             return;
@@ -240,18 +232,23 @@ pub(super) fn publication(
             {
                 return Ok(());
             }
-            let mut model = model.clone();
-            model.max_text_width = Some(hint_width(
-                monitor.rcWork.right - monitor.rcWork.left,
-                get_dpi_for_point(point),
-            ));
+            let mut model = NotificationModel::suggestion(text.clone());
+            model.hint_anchor = Some(point);
+            let dpi = get_dpi_for_point(point);
+            let (x, y) =
+                model
+                    .hint_style
+                    .expect("Suggestion style")
+                    .anchor(rect.left, rect.bottom, dpi);
+            model.max_text_width =
+                Some(hint_width(monitor.rcWork.right - monitor.rcWork.left, dpi));
             displayed.notification.set_model(model);
             if slot.epoch.get() != epoch {
                 return Ok(());
             }
             displayed.notification.set_timer(std::time::Duration::ZERO);
-            displayed.notification.set_position(rect.left, rect.bottom);
-            displayed.notification.set_position(rect.left, rect.bottom);
+            displayed.notification.set_position(x, y);
+            displayed.notification.set_position(x, y);
             displayed.notification.show();
             let visible = displayed.notification.is_visible();
             slot.publish(epoch, displayed, visible);

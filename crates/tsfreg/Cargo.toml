@@ -18,4 +18,5 @@ windows = { version = "0.62.2", features = [
 windows-registry = { version = "0.6.1", optional = true }
 
 [features]
+test-ipc = ["chewing_tip_core/test-ipc"]
 nightly = ["dep:windows-registry"]
