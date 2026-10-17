@@ -506,3 +506,34 @@ fn key_route_shift_probe_preserves_native_timer_and_toggle_without_reloading() {
     );
     assert_eq!(s.lang_mode.get(), TsfLangMode::English);
 }
+
+#[test]
+fn accepted_preedit_entry_does_not_rescore() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut service, tsf, calls) = fixture(2, 0);
+    let proposal = service
+        .chewing_editor
+        .d512_report()
+        .unwrap()
+        .suggestion
+        .unwrap();
+    let before = calls.load(Ordering::SeqCst);
+    assert!(super::super::d512::accept_current(
+        &mut service.chewing_editor,
+        &proposal
+    ));
+    assert_eq!(calls.load(Ordering::SeqCst), before);
+    // Real redraw entry, including cursor/syllable/interval getters; only the
+    // external TSF document write is denied by the synthetic context.
+    service
+        .update_preedit(&tsf.cast().unwrap(), String::new())
+        .unwrap();
+    assert_eq!(
+        calls.load(Ordering::SeqCst),
+        before,
+        "accepted update_preedit rescored"
+    );
+    assert_eq!(service.chewing_editor.display_commit(), "");
+    assert_eq!(calls.load(Ordering::SeqCst), before);
+}
