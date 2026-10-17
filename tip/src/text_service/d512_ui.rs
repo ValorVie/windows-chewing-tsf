@@ -93,12 +93,21 @@ impl<T> HintSlot<T> {
         .ok()
     }
 }
-pub(super) fn accept_key_label(key: i32) -> &'static str {
-    match key {
-        1 => "Ctrl+Tab",
-        2 => "→",
-        _ => "Tab",
-    }
+fn hint_text(proposal: &D512Suggestion, simplified: bool, _accept_key: i32) -> String {
+    // Mac uses the same symbol for every configured acceptance gesture.
+    let words = proposal
+        .changes
+        .iter()
+        .map(|change| {
+            if simplified {
+                zhconv::zhconv(&change.text, zhconv::Variant::ZhHans)
+            } else {
+                change.text.clone()
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("／");
+    format!("⇥ {words}")
 }
 pub(super) fn utf16_offset(text: &str, scalar: usize) -> i32 {
     text.chars()
@@ -172,16 +181,11 @@ pub(super) fn publication(
 ) -> CompositionApplied {
     let epoch = slot.epoch.get();
     let slot = Rc::downgrade(slot);
-    let text = if simplified {
-        zhconv::zhconv(&proposal.text, zhconv::Variant::ZhHans)
-    } else {
-        proposal.text.clone()
-    };
     let model = NotificationModel {
-        text: HSTRING::from(format!(
-            "{} 接受：{}",
-            accept_key_label(cfg.effective_d512_suggestion_accept_key()),
-            text
+        text: HSTRING::from(hint_text(
+            &proposal,
+            simplified,
+            cfg.effective_d512_suggestion_accept_key(),
         )),
         font_family: HSTRING::from(&cfg.font_family),
         font_size: cfg.font_size as f32,
@@ -461,12 +465,40 @@ mod tests {
         slot.withdraw();
         assert_eq!(drops.get(), 4);
     }
+    fn proposal(changes: &[&str]) -> D512Suggestion {
+        D512Suggestion {
+            text: "這是完整的建議句，提示不該把它整句顯示".into(),
+            outcome_index: 1,
+            fused_gap: 3.,
+            changes: changes
+                .iter()
+                .enumerate()
+                .map(|(i, text)| chewing::d512::D512Change {
+                    start: i,
+                    end: i + 1,
+                    text: (*text).into(),
+                })
+                .collect(),
+        }
+    }
     #[test]
-    fn d512_labels_follow_the_actual_accept_key() {
-        assert_eq!(accept_key_label(0), "Tab");
-        assert_eq!(accept_key_label(1), "Ctrl+Tab");
-        assert_eq!(accept_key_label(2), "→");
-        assert_eq!(accept_key_label(99), "Tab");
+    fn d512_mac_hint_shows_only_changed_words() {
+        assert_eq!(hint_text(&proposal(&["逝世"]), false, 0), "⇥ 逝世");
+        assert_eq!(
+            hint_text(&proposal(&["逝世", "代錶"]), false, 0),
+            "⇥ 逝世／代錶"
+        );
+        assert_eq!(hint_text(&proposal(&["代錶"]), true, 0), "⇥ 代表");
+    }
+    #[test]
+    fn d512_mac_hint_prefix_is_independent_of_accept_key() {
+        for key in [0, 1, 2, 99] {
+            assert_eq!(
+                hint_text(&proposal(&["逝世"]), false, key),
+                "⇥ 逝世",
+                "key {key}"
+            );
+        }
     }
     #[test]
     fn d512_utf16_caret_and_hint_width_are_bounded() {

@@ -86,7 +86,9 @@ composition end. In normal Chinese composition without unfinished Zhuyin,
 Tab/Ctrl+Tab in their configured mode consume the gesture even without a valid
 suggestion; Right keeps native behavior when acceptance fails. Other modifiers,
 candidate windows and keybindings retain their existing behavior. The hint
-identifies the configured gesture. Only the pure Ctrl prefix of configured
+always uses `⇥ ` followed by the engine-provided changed words joined with `／`.
+It does not display or diff the full winning sentence; acceptance still uses
+that complete proposal. Only the pure Ctrl prefix of configured
 Ctrl+Tab preserves the hint; other keys withdraw it.
 
 Hints reuse Notification with an independent owner and no timeout. UI suppression
