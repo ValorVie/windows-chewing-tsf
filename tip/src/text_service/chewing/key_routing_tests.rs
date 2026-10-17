@@ -73,6 +73,7 @@ macro_rules! unsupported {
 struct Tsf {
     readonly: Cell<bool>,
     edits: Cell<u32>,
+    execute_sessions: Cell<bool>,
     document: Rc<Document>,
 }
 
@@ -85,6 +86,12 @@ impl ITfContext_Impl for Tsf_Impl {
         dwflags: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
     ) -> windows_core::Result<windows_core::HRESULT> {
         self.edits.set(self.edits.get() + 1);
+        if self.execute_sessions.get() {
+            return Ok(match unsafe { pes.ok()?.DoEditSession(0) } {
+                Ok(()) => windows_core::HRESULT(0),
+                Err(error) => error.code(),
+            });
+        }
         Err(E_FAIL.into())
     }
     fn GetStatus(&self) -> windows_core::Result<TS_STATUS> {
@@ -337,6 +344,7 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
     let tsf = Tsf {
         readonly: Cell::new(false),
         edits: Cell::new(0),
+        execute_sessions: Cell::new(false),
         document: Rc::new(Document::default()),
     }
     .into_object();
@@ -817,4 +825,60 @@ fn calibration_enter_captures_preedit_before_editor_and_ignores_hidden_rescore()
     // This context denies the document write. Only the saved preedit ID ends.
     assert_eq!(r[1].phase, "cancel");
     assert_eq!(r[0].id, r[1].id);
+}
+
+#[test]
+fn enter_entry_reuses_displayed_result_when_scorer_becomes_unavailable() {
+    struct Once(Arc<AtomicUsize>);
+    impl SentenceScorer for Once {
+        fn score(
+            &mut self,
+            req: &SentenceRequest,
+            _: Instant,
+        ) -> std::result::Result<Vec<f64>, D512Error> {
+            if self.0.fetch_add(1, Ordering::SeqCst) != 0 {
+                return Err(D512Error::Timeout);
+            }
+            Ok(req
+                .candidates
+                .iter()
+                .map(|text| if text == "代錶" { 100. } else { -100. })
+                .collect())
+        }
+    }
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, _) = fixture(1, 0);
+    let calls = Arc::new(AtomicUsize::new(0));
+    s.chewing_editor
+        .set_sentence_scorer(
+            Some(Box::new(Once(calls.clone()))),
+            D512Options {
+                mode: D512Mode::Automatic,
+                weight: 0.25,
+                margin: 0.5,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+    s.chewing_editor
+        .set_editor_options(|options| options.disable_auto_learn_phrase = true);
+    // The synthetic context denies the confirmed-left read, which means empty
+    // context on both display and Enter; a changed context must remain a miss.
+    s.chewing_editor.set_d512_context("");
+    assert_eq!(s.chewing_editor.display(), "代錶");
+    assert_eq!(calls.load(Ordering::SeqCst), 1);
+    t.execute_sessions.set(true);
+    assert!(
+        s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+            .unwrap()
+    );
+    assert_eq!(
+        (
+            t.document.text.borrow().clone(),
+            calls.load(Ordering::SeqCst)
+        ),
+        ("代錶".to_owned(), 1),
+        "Enter changed displayed output or rescored"
+    );
 }

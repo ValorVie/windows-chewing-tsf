@@ -35,6 +35,11 @@ calibration getter or send calibration IPC. The libchewing dependency must
 provide both `d512_calibration()` and the single-candidate scoring skip
 described in its `docs/d512.md`.
 
+The engine reuses a successful evaluation when Enter commits the same input
+and confirmed context with unchanged native candidates and D512 parameters.
+This keeps committed text consistent with the displayed preedit and avoids
+another scoring call. Failed or timed-out evaluations are not cached.
+
 Each fresh collected preedit evaluation gets a random ID and a `rerank` record.
 Repeated reads of that attempt do not create another record. All pending records
 are retained until commit or cancel. Before passing a commit key to the editor,
