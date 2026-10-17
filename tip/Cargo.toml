@@ -58,3 +58,6 @@ embed-resource.workspace = true
 
 [features]
 nightly = []
+
+[dev-dependencies]
+serde_json.workspace = true

@@ -35,6 +35,9 @@ use windows::{
 };
 use windows_registry::{CURRENT_USER, Key};
 
+// Balanced suggestion preset; keep the calibrated threshold at full precision.
+pub const DEFAULT_D512_SUGGEST_PARAMS: (f64, f64) = (0.25, 4.288167167322101);
+
 #[derive(Debug, PartialEq, Default, Serialize, Deserialize)]
 pub struct Config {
     pub chewing_tsf: ChewingTsfConfig,
@@ -75,6 +78,10 @@ pub struct ChewingTsfConfig {
     pub d512_weight: f64,
     #[serde(default = "default_d512_margin")]
     pub d512_margin: f64,
+    #[serde(default = "default_d512_suggest_weight")]
+    pub d512_suggest_weight: f64,
+    #[serde(default = "default_d512_suggest_margin")]
+    pub d512_suggest_margin: f64,
     pub cand_per_row: i32,
     pub cand_per_page: i32,
     pub font_size: i32,
@@ -110,6 +117,13 @@ fn default_d512_margin() -> f64 {
     0.25
 }
 
+fn default_d512_suggest_weight() -> f64 {
+    DEFAULT_D512_SUGGEST_PARAMS.0
+}
+fn default_d512_suggest_margin() -> f64 {
+    DEFAULT_D512_SUGGEST_PARAMS.1
+}
+
 impl Default for ChewingTsfConfig {
     fn default() -> Self {
         Self {
@@ -140,6 +154,8 @@ impl Default for ChewingTsfConfig {
             d512_suggestion_accept_key: 0,
             d512_weight: default_d512_weight(),
             d512_margin: default_d512_margin(),
+            d512_suggest_weight: default_d512_suggest_weight(),
+            d512_suggest_margin: default_d512_suggest_margin(),
             cand_per_row: 3,
             cand_per_page: 9,
             font_size: 16,
@@ -178,10 +194,9 @@ impl Default for ChewingTsfConfig {
 
 impl ChewingTsfConfig {
     /// Resolves the runtime mode without changing the saved user choice.
-    /// Suggestion mode temporarily uses automatic reranking.
     pub fn effective_d512_mode(&self) -> i32 {
         match self.d512_mode {
-            0 => 0,
+            0..=2 => self.d512_mode,
             _ => default_d512_mode(),
         }
     }
@@ -340,6 +355,12 @@ impl Config {
             if let Ok(value) = reg_get_f64(&key, "D512Margin") {
                 cfg.d512_margin = value;
             }
+            if let Ok(value) = reg_get_f64(&key, "D512SuggestWeight") {
+                cfg.d512_suggest_weight = value;
+            }
+            if let Ok(value) = reg_get_f64(&key, "D512SuggestMargin") {
+                cfg.d512_suggest_margin = value;
+            }
             if let Ok(value) = reg_get_i32(&key, "SelAreaLen") {
                 cfg.cand_per_page = value;
             }
@@ -493,6 +514,14 @@ impl Config {
         );
         let _ = key.set_string("D512Weight", chewing_tsf.d512_weight.to_string());
         let _ = key.set_string("D512Margin", chewing_tsf.d512_margin.to_string());
+        let _ = key.set_string(
+            "D512SuggestWeight",
+            chewing_tsf.d512_suggest_weight.to_string(),
+        );
+        let _ = key.set_string(
+            "D512SuggestMargin",
+            chewing_tsf.d512_suggest_margin.to_string(),
+        );
         let _ = reg_set_i32(&key, "SelAreaLen", chewing_tsf.cand_per_page);
         let _ = reg_set_bool(&key, "CursorCandList", chewing_tsf.cursor_cand_list);
         let _ = reg_set_bool(

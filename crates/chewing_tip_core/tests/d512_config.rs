@@ -174,7 +174,7 @@ fn d512_zero_weight_and_margin_are_valid() {
 #[test]
 fn d512_effective_mode_does_not_rewrite_user_choice() {
     let mut cfg = Config::default();
-    for (stored, effective) in [(0, 0), (1, 1), (2, 1), (3, 1), (-1, 1)] {
+    for (stored, effective) in [(0, 0), (1, 1), (2, 2), (3, 1), (-1, 1)] {
         cfg.chewing_tsf.d512_mode = stored;
         assert_eq!(cfg.chewing_tsf.effective_d512_mode(), effective);
         assert_eq!(cfg.chewing_tsf.d512_mode, stored);
@@ -303,5 +303,86 @@ fn d512_accept_key_effective_value_does_not_rewrite_user_choice() {
             assert_accept_key(&cfg, stored);
             assert_eq!(cfg.chewing_tsf.d512_mode, mode);
         }
+    }
+}
+
+fn assert_suggest_params(cfg: &Config, weight: f64, margin: f64) {
+    let value = serde_json::to_value(&cfg.chewing_tsf).unwrap();
+    assert_eq!(value["d512_suggest_weight"], json!(weight));
+    assert_eq!(value["d512_suggest_margin"], json!(margin));
+}
+
+#[test]
+fn d512_suggest_params_defaults_and_older_json() {
+    assert_suggest_params(&Config::default(), 0.25, 4.288167167322101);
+    let mut value = serde_json::to_value(Config::default()).unwrap();
+    let fields = value["chewing_tsf"].as_object_mut().unwrap();
+    fields.remove("d512_suggest_weight");
+    fields.remove("d512_suggest_margin");
+    assert_suggest_params(
+        &serde_json::from_value(value).unwrap(),
+        0.25,
+        4.288167167322101,
+    );
+}
+
+#[test]
+fn d512_suggest_params_registry_roundtrip_is_independent() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_string("D512Weight", "0.375").unwrap();
+    key.set_string("D512Margin", "0.5").unwrap();
+    key.set_string("D512SuggestWeight", "0.625").unwrap();
+    key.set_string("D512SuggestMargin", "1.125").unwrap();
+    let cfg = Config::from_reg().unwrap();
+    assert_settings(&cfg, 1, 0.375, 0.5);
+    assert_suggest_params(&cfg, 0.625, 1.125);
+    cfg.save_reg();
+    assert_eq!(key.get_string("D512SuggestWeight").unwrap(), "0.625");
+    assert_eq!(key.get_string("D512SuggestMargin").unwrap(), "1.125");
+    assert_settings(&Config::from_reg().unwrap(), 1, 0.375, 0.5);
+}
+
+#[test]
+fn d512_suggest_params_missing_and_invalid_values_use_defaults() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    assert_suggest_params(&Config::from_reg().unwrap(), 0.25, 4.288167167322101);
+    for invalid in ["", "invalid", "NaN", "inf", "-inf", "1e999", "-0.01"] {
+        key.set_string("D512SuggestWeight", invalid).unwrap();
+        key.set_string("D512SuggestMargin", "0.75").unwrap();
+        assert_suggest_params(&Config::from_reg().unwrap(), 0.25, 0.75);
+        key.set_string("D512SuggestWeight", "0.5").unwrap();
+        key.set_string("D512SuggestMargin", invalid).unwrap();
+        assert_suggest_params(&Config::from_reg().unwrap(), 0.5, 4.288167167322101);
+    }
+    key.set_u32("D512SuggestWeight", 1).unwrap();
+    key.set_u64("D512SuggestMargin", 1).unwrap();
+    assert_suggest_params(&Config::from_reg().unwrap(), 0.25, 4.288167167322101);
+}
+
+#[test]
+fn d512_suggest_params_save_decimal_strings_and_zero() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for (weight, margin) in [(0.625, 1.125), (0.0, 0.0)] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["d512_suggest_weight"] = json!(weight);
+        value["chewing_tsf"]["d512_suggest_margin"] = json!(margin);
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        cfg.save_reg();
+        assert_eq!(
+            key.get_string("D512SuggestWeight").unwrap(),
+            weight.to_string()
+        );
+        assert_eq!(
+            key.get_string("D512SuggestMargin").unwrap(),
+            margin.to_string()
+        );
+        assert_suggest_params(&Config::from_reg().unwrap(), weight, margin);
+        assert_settings(&cfg, 1, 0.25, 0.25);
     }
 }
