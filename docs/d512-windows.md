@@ -61,10 +61,13 @@ connections. It creates the directory/file only after that check, writes sorted
 UTF-8 JSON with one trailing newline, and emits one content-free error if a
 record cannot be saved. The IPC loop keeps running without a reply.
 
-Records go to `user_dir()/calibration.jsonl`, using the existing Chewing user
-data resolver. On Windows this is normally `%APPDATA%\Chewing`, or the existing
-legacy `%USERPROFILE%\ChewingTextService`; `CHEWING_USER_PATH` overrides the data
-directory. The host does not choose its installation or working directory.
+Records go to `calibration.jsonl` in the Chewing user data directory. The host
+uses `SHGetKnownFolderPath` for the current user's Profile and RoamingAppData,
+so a host launched with a cleared environment still resolves the directory.
+It preserves Chewing's priority: `CHEWING_USER_PATH` when present, then an
+existing Profile/`ChewingTextService` directory, otherwise RoamingAppData/`Chewing`.
+It does not use its installation or working directory for records. The launcher's
+cleared environment and `ORT_DISABLE_TELEMETRY=1` remain unchanged.
 
 Fields match the Mac calibration record, including explicit null `modelLogP`
 and `fused` values when scores are unavailable. Windows emits zero personal

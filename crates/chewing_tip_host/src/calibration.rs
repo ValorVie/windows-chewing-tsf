@@ -8,6 +8,8 @@ use std::{
     sync::Mutex,
 };
 
+mod directory;
+
 pub(crate) struct CalibrationLog {
     sequence: Mutex<()>,
     enabled: Box<dyn Fn() -> bool + Send + Sync>,
@@ -22,9 +24,7 @@ fn enabled_from_registry() -> bool {
 }
 impl CalibrationLog {
     pub(crate) fn new() -> Self {
-        Self::with_sources(enabled_from_registry, || {
-            chewing_tip_core::shell::user_dir().map_err(|_| ())
-        })
+        Self::with_sources(enabled_from_registry, directory::resolve)
     }
     fn with_sources(
         enabled: impl Fn() -> bool + Send + Sync + 'static,
@@ -343,5 +343,141 @@ pub(crate) mod tests {
                 .count(),
             1
         );
+    }
+    #[test]
+    fn calibration_known_folder_clean_launch_environment() {
+        use std::process::{Command, Stdio};
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        for case in ["new", "legacy", "legacy-file"] {
+            let temp = TempDir::new();
+            let profile = temp.0.join("profile");
+            fs::create_dir_all(&profile).unwrap();
+            if case == "legacy" {
+                fs::create_dir(profile.join("ChewingTextService")).unwrap();
+            }
+            if case == "legacy-file" {
+                fs::write(
+                    profile.join("ChewingTextService"),
+                    b"synthetic non-directory",
+                )
+                .unwrap();
+            }
+            let mut child = Command::new(std::env::current_exe().unwrap())
+                .env_clear()
+                .env("ORT_DISABLE_TELEMETRY", "1")
+                .args([
+                    "--exact",
+                    "calibration::tests::calibration_known_folder_env_child",
+                    "--ignored",
+                    "--nocapture",
+                ])
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::piped())
+                .spawn()
+                .unwrap();
+            let input = serde_json::json!({"root":temp.0,"case":case});
+            child
+                .stdin
+                .take()
+                .unwrap()
+                .write_all(&serde_json::to_vec(&input).unwrap())
+                .unwrap();
+            let output = child.wait_with_output().unwrap();
+            assert!(
+                output.status.success(),
+                "clean launch case {case} failed: {}{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+        }
+    }
+    #[test]
+    #[ignore = "child entry; invoked by the ORT-only environment parent test"]
+    fn calibration_known_folder_env_child() {
+        use directory::KnownFolder;
+        assert_eq!(std::env::var("ORT_DISABLE_TELEMETRY").unwrap(), "1");
+        for name in ["AppData", "USERPROFILE", "CHEWING_USER_PATH"] {
+            assert!(std::env::var_os(name).is_none());
+        }
+        let input: serde_json::Value = serde_json::from_reader(std::io::stdin()).unwrap();
+        let root = PathBuf::from(input["root"].as_str().unwrap());
+        let case = input["case"].as_str().unwrap();
+        let _registry = Registry::new();
+        _registry.key().set_u32("D512LogCalibration", 1).unwrap();
+        let profile = root.join("profile");
+        let roaming = root.join("roaming");
+        let expected = if case == "legacy" {
+            profile.join("ChewingTextService")
+        } else {
+            roaming.join("Chewing")
+        };
+        let logger = CalibrationLog::with_sources(enabled_from_registry, move || {
+            directory::resolve_with(
+                std::env::var("CHEWING_USER_PATH").ok().map(PathBuf::from),
+                |folder| {
+                    Ok(match folder {
+                        KnownFolder::Profile => profile.clone(),
+                        KnownFolder::Roaming => roaming.clone(),
+                    })
+                },
+            )
+        });
+        logger
+            .write_call(records()[0].clone().into_call().unwrap())
+            .expect("ORT-only host must resolve synthetic data directory");
+        assert_eq!(
+            fs::read_to_string(expected.join("calibration.jsonl"))
+                .unwrap()
+                .lines()
+                .count(),
+            1
+        );
+        // Exercise real Known Folder bindings in the cleared environment, but
+        // never inspect or write anything under those real returned paths.
+        for folder in [KnownFolder::Profile, KnownFolder::Roaming] {
+            assert!(directory::query(folder).unwrap().is_absolute());
+        }
+    }
+    #[test]
+    fn calibration_known_folder_override_priority_and_query_failures() {
+        use directory::{KnownFolder, resolve_with};
+        let temp = TempDir::new();
+        let custom = temp.0.join("override");
+        assert_eq!(
+            resolve_with(Some(custom.clone()), |_| panic!(
+                "override must not query known folders"
+            ))
+            .unwrap(),
+            custom
+        );
+        assert_eq!(
+            resolve_with(Some(PathBuf::new()), |_| panic!(
+                "empty override must retain upstream semantics"
+            ))
+            .unwrap(),
+            PathBuf::new()
+        );
+        let profile = temp.0.join("profile");
+        let legacy = profile.join("ChewingTextService");
+        fs::create_dir_all(&legacy).unwrap();
+        assert_eq!(
+            resolve_with(None, |folder| match folder {
+                KnownFolder::Profile => Ok(profile.clone()),
+                KnownFolder::Roaming => panic!("legacy must win"),
+            })
+            .unwrap(),
+            legacy
+        );
+        let roaming = temp.0.join("roaming");
+        assert_eq!(
+            resolve_with(None, |folder| match folder {
+                KnownFolder::Profile => Err(()),
+                KnownFolder::Roaming => Ok(roaming.clone()),
+            })
+            .unwrap(),
+            roaming.join("Chewing")
+        );
+        assert!(resolve_with(None, |_| Err(())).is_err());
     }
 }
