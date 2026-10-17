@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 base64 = "0.22.1"
 base64-serde = "0.8.0"
-chewing.workspace = true
+chewing = { workspace = true, features = ["d512"] }
 fnv = "1.0.7"
 interprocess.workspace = true
 log.workspace = true
