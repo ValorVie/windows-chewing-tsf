@@ -67,9 +67,10 @@ pub fn open_url(url: &str) {
 
 pub fn launch_tip_host() -> Result<(), ShellError> {
     expect_error("Unable to launch chewing_tip_host.exe", || {
-        let path = program_dir()?.join("chewing_tip_host.exe");
+        let path = crate::ipc::server_trust::installed_host_path()?;
         let mut child = Command::new(path)
             .env_clear()
+            .env("ORT_DISABLE_TELEMETRY", "1")
             .creation_flags(
                 CREATE_BREAKAWAY_FROM_JOB.0
                     | CREATE_DEFAULT_ERROR_MODE.0

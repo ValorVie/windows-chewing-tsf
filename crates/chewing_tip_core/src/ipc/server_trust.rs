@@ -46,6 +46,21 @@ pub(super) fn attest_server(pid: u32) -> Result<(), IpcError> {
     })
 }
 
+pub(crate) fn installed_host_path() -> Result<PathBuf, IpcError> {
+    expect_error("Failed to locate the protected scoring host", || {
+        let module = own_module_path()?;
+        let root = protected_program_files()?;
+        let host = module
+            .parent()
+            .ok_or("missing module directory")?
+            .join("chewing_tip_host.exe");
+        if !unsigned_host_is_trusted(&host, &module, &root) {
+            return Err("host is not in the protected TIP installation".into());
+        }
+        Ok(host)
+    })
+}
+
 fn process_image_path(pid: u32) -> Result<PathBuf, IpcError> {
     expect_error("Failed to query server image", || {
         let mut buffer = vec![0u16; 32768];

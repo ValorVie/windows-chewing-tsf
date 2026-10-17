@@ -3,6 +3,7 @@ use std::{
 };
 
 use fnv::FnvHasher;
+use interprocess::ConnectWaitMode;
 use interprocess::os::windows::{
     named_pipe::{DuplexPipeStream, PipeListener, PipeListenerOptions, PipeMode, pipe_mode::Bytes},
     security_descriptor::SecurityDescriptor,
@@ -18,9 +19,8 @@ use windows::{
             WTD_CHOICE_FILE, WTD_REVOCATION_CHECK_CHAIN_EXCLUDE_ROOT, WTD_REVOKE_WHOLECHAIN,
             WTD_STATEACTION_CLOSE, WTD_STATEACTION_VERIFY, WTD_UI_NONE, WinVerifyTrust,
         },
-        System::Pipes::WaitNamedPipeW,
     },
-    core::{HSTRING, PCWSTR},
+    core::PCWSTR,
 };
 
 use super::server_trust::attest_server;
@@ -84,10 +84,10 @@ pub fn connect_and_attest(
 ) -> Result<DuplexPipeStream<Bytes>, IpcError> {
     expect_error("Failed to connect to named pipe", || {
         debug!("trying to connect to named pipe {pipe_path}");
-        unsafe {
-            let _ = WaitNamedPipeW(&HSTRING::from(pipe_path), timeout.as_millis() as u32);
-        }
-        let pipe = DuplexPipeStream::connect_by_path(pipe_path)?;
+        let pipe = DuplexPipeStream::connect_by_path_with_wait_mode(
+            pipe_path,
+            ConnectWaitMode::Timeout(timeout),
+        )?;
 
         let peer_pid = pipe.server_process_id()?;
         attest_server(peer_pid)?;
