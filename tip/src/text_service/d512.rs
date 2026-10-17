@@ -2,7 +2,7 @@
 
 use chewing::{
     d512::{D512Error, SentenceScorer},
-    editor::Editor,
+    editor::{Editor, LanguageMode},
 };
 use chewing_tip_core::{config::ChewingTsfConfig, ipc::d512_client::IpcSentenceScorer};
 
@@ -46,13 +46,23 @@ pub(super) enum AcceptanceGesture {
     Forward,
 }
 
+#[cfg(test)]
 pub(super) fn acceptance_gesture(
     editor: &Editor,
     cfg: &ChewingTsfConfig,
     event: chewing::input::KeyboardEvent,
 ) -> AcceptanceGesture {
+    acceptance_gesture_for_language(editor, cfg, event, editor.editor_options().language_mode)
+}
+
+pub(super) fn acceptance_gesture_for_language(
+    editor: &Editor,
+    cfg: &ChewingTsfConfig,
+    event: chewing::input::KeyboardEvent,
+    language: LanguageMode,
+) -> AcceptanceGesture {
     use chewing::{
-        editor::{ConversionEngineKind, LanguageMode},
+        editor::ConversionEngineKind,
         input::{
             KeyState,
             keysym::{SYM_RIGHT, SYM_TAB},
@@ -62,7 +72,7 @@ pub(super) fn acceptance_gesture(
         || !editor.is_entering()
         || editor.is_empty()
         || editor.entering_syllable()
-        || editor.editor_options().language_mode != LanguageMode::Chinese
+        || language != LanguageMode::Chinese
         || editor.editor_options().conversion_engine != ConversionEngineKind::ChewingEngine
         || [KeyState::Shift, KeyState::Alt, KeyState::Super]
             .iter()

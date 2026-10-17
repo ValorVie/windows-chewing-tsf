@@ -396,51 +396,31 @@ impl ChewingTextService {
         context: &ITfContext,
         ev: SystemKeyboardEvent,
     ) -> Result<bool> {
-        // A suggestion-mode probe only routes the actual key. Invalidations,
-        // legacy shortcut filtering and acceptance happen once, in OnKeyDown.
-        if self.cfg.chewing_tsf.effective_d512_mode() == 2 && self.is_composing() {
-            return Ok(true);
-        }
-        self.native_test_keydown(context, ev)
+        // Shift timing must be observed here: a false probe can be the only
+        // keydown callback. Editor/configuration/D512 changes wait for OnKeyDown.
+        self.note_shift_keydown(ev.to_keyboard_event(self.keymap));
+        self.predict_keydown(context, ev)
     }
 
-    fn native_test_keydown(
-        &mut self,
-        context: &ITfContext,
-        ev: SystemKeyboardEvent,
-    ) -> Result<bool> {
-        // NB: self.lang_mode might have changed earlier
-        self.chewing_editor
-            .set_editor_options(|opt| opt.language_mode = self.lang_mode.get().into());
-
-        let is_context_mutable = self.is_context_mutable(context)?;
-        let evt = ev.to_keyboard_event(self.keymap);
-        let simulate_english_layout = self.cfg.chewing_tsf.simulate_english_layout != 0;
-        // Determine shift key state here, this might be our last chance seeing this key.
-        if evt.ksym != SYM_LEFTSHIFT
-            && evt.ksym != SYM_RIGHTSHIFT
-            && evt.is_state_on(KeyState::Shift)
-        {
+    fn note_shift_keydown(&mut self, event: KeyboardEvent) {
+        let shift = matches!(event.ksym, SYM_LEFTSHIFT | SYM_RIGHTSHIFT);
+        if !shift && event.is_state_on(KeyState::Shift) {
             self.shift_key_state = ShiftKeyState::Consumed;
         }
-        debug!(evt:?, shift_key_state:? = self.shift_key_state; "on_test_keydown");
-
-        let mut shift_down = false;
-        if (evt.ksym == SYM_LEFTSHIFT || evt.ksym == SYM_RIGHTSHIFT)
+        if shift
             && self.cfg.chewing_tsf.switch_lang_with_shift
             && matches!(self.shift_key_state, ShiftKeyState::Up)
         {
-            debug!("shift_key_state = Down");
             self.shift_key_state = ShiftKeyState::Down(Instant::now());
-            shift_down = true;
         }
-        //
-        // Step 1. apply any config changes
-        //
-        if let Err(error) = self.apply_config_if_changed() {
-            error!("unable to load config: {error:#}");
-        }
-        //
+    }
+
+    // Shared query for OnTestKeyDown and OnKeyDown. Only reads the current
+    // configuration, editor state, and TSF context status/compartments.
+    fn predict_keydown(&self, context: &ITfContext, ev: SystemKeyboardEvent) -> Result<bool> {
+        let is_context_mutable = self.is_context_mutable(context)?;
+        let evt = ev.to_keyboard_event(self.keymap);
+        let simulate_english_layout = self.cfg.chewing_tsf.simulate_english_layout != 0;
         // Step 2. handle any mode change related keydown
         //
         // Ignore all keys if keyboard is closed
@@ -450,7 +430,9 @@ impl ChewingTextService {
         //
         // Step 2.1 handle switch lang with Shift
         //
-        if shift_down {
+        if self.cfg.chewing_tsf.switch_lang_with_shift
+            && matches!(evt.ksym, SYM_LEFTSHIFT | SYM_RIGHTSHIFT)
+        {
             return Ok(false);
         }
         //
@@ -542,7 +524,13 @@ impl ChewingTextService {
         context: &ITfContext,
         ev: SystemKeyboardEvent,
     ) -> Result<bool> {
-        let handled = match self.native_test_keydown(context, ev) {
+        self.note_shift_keydown(ev.to_keyboard_event(self.keymap));
+        self.chewing_editor
+            .set_editor_options(|opt| opt.language_mode = self.lang_mode.get().into());
+        if let Err(error) = self.apply_config_if_changed() {
+            error!("unable to load config: {error:#}");
+        }
+        let handled = match self.predict_keydown(context, ev) {
             Ok(handled) => handled,
             Err(error) => {
                 self.withdraw_d512_hint();
@@ -1226,7 +1214,12 @@ impl ChewingTextService {
         {
             return super::d512::AcceptanceGesture::None;
         }
-        super::d512::acceptance_gesture(&self.chewing_editor, &self.cfg.chewing_tsf, event)
+        super::d512::acceptance_gesture_for_language(
+            &self.chewing_editor,
+            &self.cfg.chewing_tsf,
+            event,
+            self.lang_mode.get().into(),
+        )
     }
     fn try_d512_acceptance(
         &mut self,
@@ -1275,7 +1268,7 @@ impl ChewingTextService {
             && pending
                 .as_ref()
                 .is_some_and(|pending| pending.epoch == self.d512_hint.epoch.get())
-            && self.d512_hint.visible_snapshot().is_some();
+            && self.d512_hint.has_visible_current();
         dispatch_acceptance(
             &mut self.chewing_editor,
             gesture,
@@ -1835,3 +1828,6 @@ fn keymap_from_kbtype(kbtype: KeyboardLayoutCompat) -> KeymapOp {
         _ => KeymapOp::None,
     }
 }
+
+#[cfg(test)]
+mod key_routing_tests;

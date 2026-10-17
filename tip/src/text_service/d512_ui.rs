@@ -144,6 +144,10 @@ impl Drop for DisplayedHint {
     }
 }
 impl HintSlot<DisplayedHint> {
+    pub(super) fn has_visible_current(&self) -> bool {
+        self.current()
+            .is_some_and(|item| item.notification.is_visible())
+    }
     pub(super) fn visible_snapshot(&self) -> Option<PendingHint> {
         self.current()
             .filter(|item| item.notification.is_visible())
