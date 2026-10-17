@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 
+pub mod calibration;
+
 use std::{fmt, time::Instant};
 
 use chewing::d512::{D512Error, SentenceRequest};
