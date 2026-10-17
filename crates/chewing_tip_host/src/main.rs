@@ -13,6 +13,7 @@ use windows::Win32::System::{
 
 use crate::{ipc::run_ipc_listener, ui::event_loop::MainLoop};
 
+mod calibration;
 mod ipc;
 mod scoring;
 mod text_service;
@@ -75,7 +76,8 @@ fn main() -> Result<(), scoped_error::Error> {
         let mh = main_loop.get_handle();
 
         info!("Spawn IPC thread");
-        thread::spawn(move || run_ipc_listener(listener, mh, scorer));
+        let calibration = Arc::new(calibration::CalibrationLog::new());
+        thread::spawn(move || run_ipc_listener(listener, mh, scorer, calibration));
 
         info!("Starting main loop");
         main_loop.run();

@@ -29,8 +29,26 @@ The margins follow the Mac presets by product decision; they are not the
 libchewing calibration points. Weight is 0.25 for all six presets.
 
 `D512LogCalibration` is a DWORD (0 off by default, 1 on), stored unchanged in
-`ChewingTsfConfig::d512_log_calibration`. This version provides the configuration
-field only; it does not write calibration records.
+`ChewingTsfConfig::d512_log_calibration`. The host accepts complete records via
+`im.chewing.d512.CalibrationLog` with `oneway=true`. The TIP producer is a later
+change, so this switch alone does not generate records yet.
+
+The host checks the current registry DWORD again for each record; only exactly
+1 enables writing. A shared mutex serializes append operations across pipe
+connections. It creates the directory/file only after that check, writes sorted
+UTF-8 JSON with one trailing newline, and emits one content-free error if a
+record cannot be saved. The IPC loop keeps running without a reply.
+
+Records go to `user_dir()/calibration.jsonl`, using the existing Chewing user
+data resolver. On Windows this is normally `%APPDATA%\Chewing`, or the existing
+legacy `%USERPROFILE%\ChewingTextService`; `CHEWING_USER_PATH` overrides the data
+directory. The host does not choose its installation or working directory.
+
+Fields match the Mac calibration record, including explicit null `modelLogP`
+and `fused` values when scores are unavailable. Windows emits zero personal
+hits/bonus and false personal/POM conflicts. Mac's actual wire modes are
+`automatic` and `suggest`. The existing analysis script reads these records,
+but its automatic-mode breakdown still filters on the legacy null mode.
 
 `D512SuggestionAcceptKey` is a DWORD: 0 Tab (default), 1 Ctrl+Tab, 2 Right at
 composition end. In normal Chinese composition without unfinished Zhuyin,

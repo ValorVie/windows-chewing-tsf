@@ -18,23 +18,27 @@ use log::{error, warn};
 use scoped_error::{ErrorExt, expect_error, impl_context_error};
 
 use crate::{
-    scoring::SharedScorer, text_service::chewing::TipSession, ui::event_loop::MainLoopHandle,
+    calibration::CalibrationLog, scoring::SharedScorer, text_service::chewing::TipSession,
+    ui::event_loop::MainLoopHandle,
 };
 use chewing::d512::D512Error;
+use chewing_tip_core::ipc::d512::calibration::CalibrationRecord;
 use chewing_tip_core::ipc::d512::{D512Score, MAX_FRAME_BYTES, scoring_reply};
 
 pub(crate) fn run_ipc_listener(
     listener: PipeListener<Bytes, Bytes>,
     mh: MainLoopHandle,
     scorer: Arc<SharedScorer>,
+    calibration: Arc<CalibrationLog>,
 ) -> Result<(), HandleIpcError> {
     expect_error("IPC listener failed", || {
         for pipe in listener.incoming() {
             let mh = mh.clone();
             let scorer = scorer.clone();
+            let calibration = calibration.clone();
             let pipe = pipe?;
             std::thread::spawn(move || {
-                if let Err(error) = ipc_loop(pipe, mh, scorer) {
+                if let Err(error) = ipc_loop(pipe, mh, scorer, calibration) {
                     error!("{}", error.report());
                 }
             });
@@ -47,6 +51,7 @@ fn ipc_loop(
     pipe: PipeStream<Bytes, Bytes>,
     mh: MainLoopHandle,
     scorer: Arc<SharedScorer>,
+    calibration: Arc<CalibrationLog>,
 ) -> Result<(), HandleIpcError> {
     expect_error("Failed to initialize IPC loop", || {
         let (receiver_inner, mut sender) = pipe.split();
@@ -54,7 +59,14 @@ fn ipc_loop(
         // D512 scoring never constructs an editor or accesses a user directory.
         let mut tip_session: Option<TipSession> = None;
         loop {
-            match ipc_loop_once(&mut receiver, &mut sender, &mh, &mut tip_session, &scorer) {
+            match ipc_loop_once(
+                &mut receiver,
+                &mut sender,
+                |call| mh.send(call),
+                &mut tip_session,
+                &scorer,
+                &calibration,
+            ) {
                 Ok(ControlFlow::Continue(_)) => continue,
                 Ok(ControlFlow::Break(_)) => break,
                 Err(error) => {
@@ -70,9 +82,10 @@ fn ipc_loop(
 fn ipc_loop_once(
     mut receiver: impl BufRead,
     mut sender: impl Write,
-    mh: &MainLoopHandle,
+    send_ui: impl Fn(MethodCall) -> Result<(), crate::ui::UiError>,
     tip_session: &mut Option<TipSession>,
     scorer: &SharedScorer,
+    calibration: &CalibrationLog,
 ) -> Result<ControlFlow<()>, HandleIpcError> {
     expect_error("Failed to handle one IPC message", || {
         let Some(call) = read_call_frame(&mut receiver)? else {
@@ -82,6 +95,9 @@ fn ipc_loop_once(
         let oneway = call.oneway.is_some_and(|v| v);
 
         match call.method.as_str() {
+            CalibrationRecord::METHOD => {
+                calibration.record_call(call);
+            }
             D512Score::METHOD => {
                 let reply = match serde_json::from_value::<D512Score>(call.parameters) {
                     Ok(message)
@@ -110,7 +126,7 @@ fn ipc_loop_once(
             | ShowCandidateList::METHOD
             | HideCandidateList::METHOD
             | Stop::METHOD => {
-                mh.send(call)?;
+                send_ui(call)?;
                 if !oneway {
                     sender.write_all(c"{}".to_bytes_with_nul())?;
                 }
@@ -176,6 +192,57 @@ fn read_call_frame(mut receiver: impl BufRead) -> Result<Option<MethodCall>, Han
 mod tests {
     use super::*;
     use std::io::Cursor;
+    #[test]
+    fn calibration_framed_oneway_writes_without_reply_or_legacy_editor() {
+        use crate::calibration::tests::{TEST_LOCK, TempDir, always_enabled, records};
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new();
+        let logger = always_enabled(temp.0.clone());
+        let scorer = SharedScorer::load_from_directory(&temp.0);
+        let mut session = None;
+        let call = records()[0].clone().into_call().unwrap();
+        let mut frame = serde_json::to_vec(&call).unwrap();
+        frame.push(0);
+        let mut receiver = Cursor::new(frame);
+        let mut outgoing = Vec::new();
+        assert!(matches!(
+            ipc_loop_once(
+                &mut receiver,
+                &mut outgoing,
+                |_| panic!("Calibration invoked legacy UI"),
+                &mut session,
+                &scorer,
+                &logger
+            )
+            .unwrap(),
+            ControlFlow::Continue(())
+        ));
+        assert!(outgoing.is_empty());
+        assert!(session.is_none());
+        let lines = std::fs::read_to_string(temp.0.join("calibration.jsonl")).unwrap();
+        assert_eq!(lines.lines().count(), 1);
+        // The same IPC loop remains usable for another ordinary request.
+        let frame=b"{\"method\":\"im.chewing.ipc.Ping\",\"parameters\":{\"uuid\":\"synthetic-ping\"},\"oneway\":false}\0";
+        assert!(matches!(
+            ipc_loop_once(
+                Cursor::new(frame),
+                &mut outgoing,
+                |_| panic!("Ping invoked UI"),
+                &mut session,
+                &scorer,
+                &logger
+            )
+            .unwrap(),
+            ControlFlow::Continue(())
+        ));
+        assert!(outgoing.ends_with(&[0]));
+        assert_eq!(
+            serde_json::from_slice::<MethodReply>(&outgoing[..outgoing.len() - 1])
+                .unwrap()
+                .parameters["uuid"],
+            "synthetic-ping"
+        );
+    }
     #[test]
     fn d512_frame_accepts_a_complete_call() {
         let wire = b"{\"method\":\"im.chewing.d512.Score\",\"parameters\":{}}\0";
