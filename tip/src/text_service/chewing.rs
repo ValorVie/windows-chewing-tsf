@@ -521,6 +521,28 @@ impl ChewingTextService {
         if !self.on_test_keydown(context, ev)? {
             return Ok(false);
         }
+        if self.cfg.chewing_tsf.effective_d512_mode() != 0 {
+            let session = super::edit_session::ConfirmedContext::new(
+                context.clone(),
+                self.composition.borrow().clone(),
+            )
+            .into_object();
+            // Keystroke handling permits a synchronous read session. A denied
+            // lock uses empty context rather than stale text from another field.
+            let result = unsafe {
+                context.RequestEditSession(
+                    self.tid,
+                    session.as_interface(),
+                    TF_ES_SYNC | TF_ES_READ,
+                )
+            };
+            let confirmed = if result.is_ok_and(|hr| hr.is_ok()) {
+                session.context_text()
+            } else {
+                String::new()
+            };
+            self.chewing_editor.set_d512_context(&confirmed);
+        }
         let mut evt = ev.to_keyboard_event(self.keymap);
         debug!(evt:?; "on_keydown");
 
@@ -1423,6 +1445,8 @@ impl ChewingTextService {
         let kbtype = KeyboardLayoutCompat::try_from(cfg.keyboard_layout as u8)
             .unwrap_or(KeyboardLayoutCompat::Default);
         editor.set_syllable_editor(syl_editor_from_kbtype(kbtype));
+        // Configuration or transport failure leaves the native engine usable.
+        let _ = super::d512::configure_editor(&mut editor, cfg);
         Ok(editor)
     }
 

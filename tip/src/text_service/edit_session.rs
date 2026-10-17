@@ -274,3 +274,60 @@ impl ITfEditSession_Impl for SelectionRect_Impl {
         Ok(())
     }
 }
+
+// Reads only the confirmed range before the composition (or current selection).
+// It never includes preedit, modifies text, or persists the returned context.
+#[implement(ITfEditSession)]
+pub(super) struct ConfirmedContext {
+    context: ITfContext,
+    composition: Option<ITfComposition>,
+    text: RefCell<String>,
+}
+impl ConfirmedContext {
+    pub(super) fn new(context: ITfContext, composition: Option<ITfComposition>) -> Self {
+        Self {
+            context,
+            composition,
+            text: RefCell::new(String::new()),
+        }
+    }
+    pub(super) fn context_text(&self) -> String {
+        self.text.take()
+    }
+}
+impl ITfEditSession_Impl for ConfirmedContext_Impl {
+    fn DoEditSession(&self, ec: u32) -> Result<()> {
+        unsafe {
+            let range = if let Some(composition) = &self.composition {
+                Some(composition.GetRange()?)
+            } else {
+                let mut selections = [TF_SELECTION::default(); 1];
+                let mut count = 0;
+                let result = self.context.GetSelection(
+                    ec,
+                    TF_DEFAULT_SELECTION,
+                    &mut selections,
+                    &mut count,
+                );
+                let [selection] = selections;
+                let range = ManuallyDrop::into_inner(selection.range);
+                result?;
+                if count == 1 { range } else { None }
+            };
+            let Some(range) = range else {
+                return Ok(());
+            };
+            let range = range.Clone()?;
+            range.Collapse(ec, TF_ANCHOR_START)?;
+            let mut shifted = 0;
+            range.ShiftStart(ec, -128, &mut shifted, ptr::null())?;
+            let mut units = [0u16; 128];
+            let mut count = 0;
+            range.GetText(ec, 0, &mut units, &mut count)?;
+            if let Some(units) = units.get(..count as usize) {
+                self.text.replace(super::d512::confirmed_tail(units));
+            }
+        }
+        Ok(())
+    }
+}

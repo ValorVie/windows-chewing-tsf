@@ -28,6 +28,7 @@ use self::display_attribute::{EnumTfDisplayAttributeInfo, get_display_attribute_
 use self::key_event::SystemKeyboardEvent;
 
 mod chewing;
+mod d512;
 mod display_attribute;
 mod edit_session;
 mod icons;
