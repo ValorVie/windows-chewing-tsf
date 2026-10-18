@@ -34,6 +34,34 @@ D512 模型、ONNX Runtime 與 MSI 步驟見 [Prepare the installer](docs/d512-w
 再用 `stage-preferences` 帶入，詳見[設定程式建置說明](https://github.com/ValorVie/windows-chewing-preferences/blob/valor-feature/docs/d512-preferences.md)。
 唯音使用者詞庫轉換見 [vchewing-to-chewing](https://github.com/ValorVie/vchewing-to-chewing)。
 
+## 發佈
+
+在已備妥上述工具、MSVC x64／i686 Rust target 與 WiX 7（使用者已接受 EULA）的
+Windows PowerShell 5.1 或 pwsh 7 中執行。原始碼工作樹必須乾淨；
+版本更新及設定程式建置都在暫存工作目錄進行。
+
+```powershell
+$version = '26.9.0-valor.1'
+$preferencesRef = '<設定程式的完整 40 位 commit SHA>'
+.\scripts\release.ps1 -SelfTest
+.\scripts\release.ps1 -Version $version -PreferencesRef $preferencesRef
+```
+
+預設只預覽，不需要 GitHub 登入。腳本會列出 MSI、SHA-256、繁中 release notes
+及組成版本；`-CacheDir` 可指定快取位置，預設在 `%LOCALAPPDATA%` 下。
+每次都驗素材雜湊；同一組來源、版本與工具會沿用已驗證的成品，避免重打包改變 MSI 雜湊。
+失敗時保留 log 與暫存路徑，成功才清除暫存工作目錄。
+
+使用者試用通過後，先登入 GitHub CLI，確認 HEAD 已推到 `origin/valor-feature`，再發佈：
+
+```powershell
+gh auth login
+.\scripts\release.ps1 -Version $version -PreferencesRef $preferencesRef -Publish
+```
+
+`-Publish` 才會建立／推送 `v<Version>` tag 並建立預覽版 Release，附 MSI 及 `.msi.sha256`。
+既有 tag 指向別處或 Release 資產不同就停止；相同資產不重傳，不 force push、不覆蓋或刪除。
+
 ## 授權
 
 本 repo 採 GPL-3.0-or-later，libchewing 採 LGPL-2.1-or-later。

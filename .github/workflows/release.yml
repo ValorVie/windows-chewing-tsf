@@ -7,10 +7,12 @@ on:
 
 jobs:
   release-build:
+    if: github.repository == 'chewing/windows-chewing-tsf'
     uses: ./.github/workflows/ci.yml
     with:
       nightly: false
   code-signing:
+    if: github.repository == 'chewing/windows-chewing-tsf'
     needs: [release-build]
     uses: ./.github/workflows/code-signing.yml
     with:
@@ -21,7 +23,7 @@ jobs:
   release:
     runs-on: ubuntu-latest
     name: Release
-    if: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+    if: ${{ github.repository == 'chewing/windows-chewing-tsf' && (github.event_name == 'schedule' || github.event_name == 'workflow_dispatch') }}
     needs: [code-signing]
     permissions:
       contents: write
