@@ -66,7 +66,8 @@ function Get-TagPlan([string]$Head, [string]$Local, [string]$Remote) {
 }
 function Get-ReleasePlan([bool]$Exists, [bool]$Prerelease, [bool]$Draft, [string]$LocalMsi, [string]$RemoteMsi, [string]$LocalSum, [string]$RemoteSum) {
     if (-not $Exists) { return 'Create' }
-    if (-not $Prerelease -or $Draft -or -not $RemoteMsi -or -not $RemoteSum -or
+    # Matching assets are a no-op even if the existing release flags changed.
+    if (-not $RemoteMsi -or -not $RemoteSum -or
         $LocalMsi -cne $RemoteMsi -or $LocalSum -cne $RemoteSum) { throw 'Release conflict: existing release/assets differ; nothing will be overwritten' }
     return 'Reuse'
 }
@@ -104,8 +105,8 @@ function Invoke-SelfTests {
         @{ Name = 'MSI conflict'; Run = { Assert-Rejected { Get-ReleasePlan $true $true $false 'm' 'x' 's' 's' } 'Release conflict' } },
         @{ Name = 'checksum conflict'; Run = { Assert-Rejected { Get-ReleasePlan $true $true $false 'm' 'm' 's' 'x' } 'Release conflict' } },
         @{ Name = 'missing asset'; Run = { Assert-Rejected { Get-ReleasePlan $true $true $false 'm' '' 's' '' } 'Release conflict' } },
-        @{ Name = 'stable release'; Run = { Assert-Rejected { Get-ReleasePlan $true $false $false 'm' 'm' 's' 's' } 'Release conflict' } },
-        @{ Name = 'draft release'; Run = { Assert-Rejected { Get-ReleasePlan $true $true $true 'm' 'm' 's' 's' } 'Release conflict' } }
+        @{ Name = 'same stable release'; Run = { Assert-Equal (Get-ReleasePlan $true $false $false 'm' 'm' 's' 's') 'Reuse' } },
+        @{ Name = 'same draft release'; Run = { Assert-Equal (Get-ReleasePlan $true $true $true 'm' 'm' 's' 's') 'Reuse' } }
     )
     $passed = 0
     $failed = 0
@@ -201,7 +202,7 @@ function Get-Assets($Pins, [string]$Cache, [string]$Temporary) {
         $zip = Join-Path $Cache 'assets/onnxruntime-win-x64-1.31.0.zip'
         Get-CachedFile $zip $Pins.Archive 'https://github.com/microsoft/onnxruntime/releases/download/v1.31.0/onnxruntime-win-x64-1.31.0.zip'
         $unpacked = Join-Path $Temporary 'ort'
-        Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
+        Microsoft.PowerShell.Archive\Expand-Archive -LiteralPath $zip -DestinationPath $unpacked
         $ortRoot = Join-Path $unpacked 'onnxruntime-win-x64-1.31.0'
         foreach ($pair in @(@('lib/onnxruntime.dll','onnxruntime.dll'),@('lib/onnxruntime_providers_shared.dll','onnxruntime_providers_shared.dll'),@('LICENSE','ORT-LICENSE.txt'),@('ThirdPartyNotices.txt','ORT-ThirdPartyNotices.txt'))) {
             $source = Join-Path $ortRoot $pair[0]
@@ -398,8 +399,24 @@ function Invoke-Release {
         Write-Log 'Build cache hit: prior check-installer receipt, MSI version and all output hashes verified'
     } else {
         $env:CARGO_TARGET_DIR = Join-Path $CacheDir 'b/p'
+        # Cargo searches ancestors even across Git boundaries. An ignored in-repo
+        # cache must not make this standalone Tauri package join another workspace.
+        $preferenceManifest = Join-Path $preferences 'src-tauri/Cargo.toml'
+        $manifestBytes = [IO.File]::ReadAllBytes($preferenceManifest)
+        $manifestText = [IO.File]::ReadAllText($preferenceManifest)
+        $ancestor = [IO.Directory]::GetParent($preferences)
+        $nestedCargo = $false
+        while ($null -ne $ancestor) {
+            if (Test-Path -LiteralPath (Join-Path $ancestor.FullName 'Cargo.toml')) { $nestedCargo = $true; break }
+            $ancestor = $ancestor.Parent
+        }
+        if ($nestedCargo -and $manifestText -notmatch '(?m)^\[workspace(?:\]|\.)') {
+            Write-Utf8 $preferenceManifest ($manifestText + "`n[workspace]`n")
+            Write-Log 'Isolated temporary preferences package from ancestor Cargo workspace'
+        }
         [void](Invoke-Tool 'npm.cmd' @('ci','--fetch-retries=0') $preferences)
         [void](Invoke-Tool 'npm.cmd' @('run','tauri','--','build','--no-bundle','--ci','--target','x86_64-pc-windows-msvc','--','--locked') $preferences)
+        [IO.File]::WriteAllBytes($preferenceManifest, $manifestBytes)
         if ((Get-Hash (Join-Path $preferences 'src-tauri/Cargo.lock')) -cne $preferenceLock -or (Get-Git @('status','--porcelain','--untracked-files=all') $preferences)) { throw 'Preferences source/lock changed during build' }
         $preferenceExe = Join-Path $env:CARGO_TARGET_DIR 'x86_64-pc-windows-msvc/release/ChewingPreferences.exe'
         $preferenceHash = Get-Hash $preferenceExe
@@ -481,4 +498,3 @@ catch {
     foreach ($name in $savedEnvironment.Keys) { if ([Environment]::GetEnvironmentVariable($name,'Process') -cne $savedEnvironment[$name]) { [Environment]::SetEnvironmentVariable($name,$savedEnvironment[$name],'Process') } }
 }
 exit $exitCode
-
