@@ -70,6 +70,116 @@ fn assert_settings(cfg: &Config, mode: i32, weight: f64, margin: f64) {
     assert_eq!(value["d512_margin"], json!(margin));
 }
 
+fn assert_input_habits(cfg: &Config, ctrl_symbol: bool, cursor_wrap: bool) {
+    let value = serde_json::to_value(&cfg.chewing_tsf).unwrap();
+    assert_eq!(value["ctrl_symbol_new_phonetic"], json!(ctrl_symbol));
+    assert_eq!(value["cursor_wrap"], json!(cursor_wrap));
+}
+
+#[test]
+fn input_habits_missing_registry_values_use_and_save_tsf_defaults() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    assert_input_habits(&Config::default(), true, false);
+    let cfg = Config::from_reg().unwrap();
+    assert_input_habits(&cfg, true, false);
+    assert!(key.get_u32("CtrlSymbolNewPhonetic").is_err());
+    assert!(key.get_u32("CursorWrap").is_err());
+    cfg.save_reg();
+    assert_eq!(key.get_u32("CtrlSymbolNewPhonetic").unwrap(), 1);
+    assert_eq!(key.get_u32("CursorWrap").unwrap(), 0);
+}
+
+#[test]
+fn input_habits_reads_dword_booleans_independently() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for (ctrl_symbol, cursor_wrap) in [(0, 0), (0, 1), (1, 0), (1, 1), (7, u32::MAX)] {
+        key.set_u32("CtrlSymbolNewPhonetic", ctrl_symbol).unwrap();
+        key.set_u32("CursorWrap", cursor_wrap).unwrap();
+        assert_input_habits(
+            &Config::from_reg().unwrap(),
+            ctrl_symbol > 0,
+            cursor_wrap > 0,
+        );
+    }
+}
+
+#[test]
+fn input_habits_save_roundtrips_all_boolean_pairs() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for (ctrl_symbol, cursor_wrap) in [(false, false), (false, true), (true, false), (true, true)] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["ctrl_symbol_new_phonetic"] = json!(ctrl_symbol);
+        value["chewing_tsf"]["cursor_wrap"] = json!(cursor_wrap);
+        let cfg: Config = serde_json::from_value(value).unwrap();
+        cfg.save_reg();
+        assert_eq!(
+            key.get_u32("CtrlSymbolNewPhonetic").unwrap(),
+            u32::from(ctrl_symbol)
+        );
+        assert_eq!(key.get_u32("CursorWrap").unwrap(), u32::from(cursor_wrap));
+        assert_input_habits(&Config::from_reg().unwrap(), ctrl_symbol, cursor_wrap);
+    }
+}
+
+#[test]
+fn input_habits_survive_unrelated_config_save() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for (ctrl_symbol, cursor_wrap) in [(0, 1), (1, 0)] {
+        key.set_u32("CtrlSymbolNewPhonetic", ctrl_symbol).unwrap();
+        key.set_u32("CursorWrap", cursor_wrap).unwrap();
+        key.set_string("D512Weight", "0.375").unwrap();
+        let mut cfg = Config::from_reg().unwrap();
+        cfg.chewing_tsf.esc_clean_all_buf = true;
+        cfg.chewing_tsf.font_size = 19;
+        cfg.chewing_tsf.d512_mode = 2;
+        cfg.save_reg();
+        assert_eq!(key.get_u32("CtrlSymbolNewPhonetic").unwrap(), ctrl_symbol);
+        assert_eq!(key.get_u32("CursorWrap").unwrap(), cursor_wrap);
+        assert_eq!(key.get_u32("EscCleanAllBuf").unwrap(), 1);
+        assert_eq!(key.get_u32("DefFontSize").unwrap(), 19);
+        assert_eq!(key.get_u32("D512Mode").unwrap(), 2);
+        assert_eq!(key.get_string("D512Weight").unwrap(), "0.375");
+        assert_input_habits(
+            &Config::from_reg().unwrap(),
+            ctrl_symbol > 0,
+            cursor_wrap > 0,
+        );
+    }
+}
+
+#[test]
+fn input_habits_older_json_uses_defaults_for_missing_fields_only() {
+    for (missing, ctrl_symbol, cursor_wrap) in [
+        (&["ctrl_symbol_new_phonetic"][..], true, true),
+        (&["cursor_wrap"][..], false, false),
+        (
+            &["ctrl_symbol_new_phonetic", "cursor_wrap"][..],
+            true,
+            false,
+        ),
+    ] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["ctrl_symbol_new_phonetic"] = json!(false);
+        value["chewing_tsf"]["cursor_wrap"] = json!(true);
+        for field in missing {
+            value["chewing_tsf"].as_object_mut().unwrap().remove(*field);
+        }
+        assert_input_habits(
+            &serde_json::from_value(value).unwrap(),
+            ctrl_symbol,
+            cursor_wrap,
+        );
+    }
+}
+
 #[test]
 fn d512_default_fields_exist() {
     assert_settings(&Config::default(), 1, 0.25, 0.5);

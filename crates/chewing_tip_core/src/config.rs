@@ -55,6 +55,10 @@ pub struct ChewingTsfConfig {
     pub show_notification: bool,
     pub enable_auto_learn: bool,
     pub esc_clean_all_buf: bool,
+    #[serde(default = "default_ctrl_symbol_new_phonetic")]
+    pub ctrl_symbol_new_phonetic: bool,
+    #[serde(default)]
+    pub cursor_wrap: bool,
     pub full_shape_symbols: bool,
     pub upper_case_with_shift: bool,
     pub add_phrase_forward: bool,
@@ -107,6 +111,10 @@ pub struct ChewingTsfConfig {
     pub modified_timestamp: u64,
 }
 
+fn default_ctrl_symbol_new_phonetic() -> bool {
+    true
+}
+
 fn default_d512_mode() -> i32 {
     1
 }
@@ -137,6 +145,8 @@ impl Default for ChewingTsfConfig {
             show_notification: true,
             enable_auto_learn: true,
             esc_clean_all_buf: false,
+            ctrl_symbol_new_phonetic: default_ctrl_symbol_new_phonetic(),
+            cursor_wrap: false,
             full_shape_symbols: true,
             upper_case_with_shift: false,
             add_phrase_forward: true,
@@ -391,6 +401,12 @@ impl Config {
             if let Ok(value) = reg_get_bool(&key, "EscCleanAllBuf") {
                 cfg.esc_clean_all_buf = value;
             }
+            if let Ok(value) = reg_get_bool(&key, "CtrlSymbolNewPhonetic") {
+                cfg.ctrl_symbol_new_phonetic = value;
+            }
+            if let Ok(value) = reg_get_bool(&key, "CursorWrap") {
+                cfg.cursor_wrap = value;
+            }
             if let Ok(value) = reg_get_bool(&key, "EasySymbolsWithShift") {
                 cfg.easy_symbols_with_shift = value;
             }
@@ -544,6 +560,12 @@ impl Config {
         );
         let _ = reg_set_bool(&key, "FullShapeSymbols", chewing_tsf.full_shape_symbols);
         let _ = reg_set_bool(&key, "EscCleanAllBuf", chewing_tsf.esc_clean_all_buf);
+        let _ = reg_set_bool(
+            &key,
+            "CtrlSymbolNewPhonetic",
+            chewing_tsf.ctrl_symbol_new_phonetic,
+        );
+        let _ = reg_set_bool(&key, "CursorWrap", chewing_tsf.cursor_wrap);
         let _ = reg_set_bool(
             &key,
             "EasySymbolsWithShift",
