@@ -471,6 +471,15 @@ impl ChewingTextService {
             return Ok(true);
         }
         if evt.is_state_on(KeyState::Control) {
+            if self.cfg.chewing_tsf.ctrl_symbol_new_phonetic
+                && (!self.chewing_editor.is_empty() || self.chewing_editor.entering_syllable())
+                && !evt.is_state_on(KeyState::Shift)
+                && !evt.is_state_on(KeyState::Super)
+                && evt.ksym.is_unicode()
+                && matches!(evt.ksym.to_unicode(), ',' | '.' | ';' | '\'' | '[' | ']')
+            {
+                return Ok(true);
+            }
             // bypass IME. This might be a shortcut key used in the application
             if self.is_composing() && evt.ksym.is_digit() {
                 // need to handle userphrase
@@ -1646,7 +1655,14 @@ impl ChewingTextService {
 
     fn build_editor_from_cfg(&self, cfg: &ChewingTsfConfig) -> Result<Editor> {
         // Recreate editor to load latest user files
-        let mut editor = Editor::chewing(None, None)?;
+        self.configure_loaded_editor(cfg, Editor::chewing(None, None)?)
+    }
+
+    fn configure_loaded_editor(
+        &self,
+        cfg: &ChewingTsfConfig,
+        mut editor: Editor,
+    ) -> Result<Editor> {
         editor.set_editor_options(|opt| {
             opt.easy_symbol_input = cfg.easy_symbols_with_shift || cfg.easy_symbols_with_shift_ctrl;
             // NB: Historically the config was inverted
@@ -1659,6 +1675,8 @@ impl ChewingTextService {
             opt.auto_shift_cursor = cfg.advance_after_selection;
             opt.candidates_per_page = cfg.cand_per_page as usize;
             opt.esc_clear_all_buffer = cfg.esc_clean_all_buf;
+            opt.ctrl_symbol_new_phonetic = cfg.ctrl_symbol_new_phonetic;
+            opt.cursor_wrap = cfg.cursor_wrap;
             opt.space_is_select_key = cfg.show_cand_with_space_key;
             opt.disable_auto_learn_phrase = !cfg.enable_auto_learn;
             opt.enable_fullwidth_toggle_key = cfg.enable_fullwidth_toggle_key;

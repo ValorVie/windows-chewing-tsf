@@ -439,7 +439,13 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
 }
 fn event(vk: u16, scan: u16, ascii: u8, modifiers: u8) -> SystemKeyboardEvent {
     let mut key_state = [0; 256];
-    for (mask, key) in [(1, VK_SHIFT), (2, VK_CONTROL), (4, VK_MENU), (8, VK_LWIN)] {
+    for (mask, key) in [
+        (1, VK_SHIFT),
+        (2, VK_CONTROL),
+        (4, VK_MENU),
+        (8, VK_LWIN),
+        (16, VK_RWIN),
+    ] {
         if modifiers & mask != 0 {
             key_state[key.0 as usize] = 0x80;
         }
@@ -450,6 +456,222 @@ fn event(vk: u16, scan: u16, ascii: u8, modifiers: u8) -> SystemKeyboardEvent {
         ascii_code: ascii,
         key_state,
     }
+}
+
+const CTRL_SYMBOLS: [(u16, u16, u8, char); 6] = [
+    (0xbc, 0x33, b',', '，'),
+    (0xbe, 0x34, b'.', '。'),
+    (0xba, 0x27, b';', '；'),
+    (0xde, 0x28, b'\'', '、'),
+    (0xdb, 0x1a, b'[', '【'),
+    (0xdd, 0x1b, b']', '】'),
+];
+
+fn input_habits_fixture(enabled: bool, content: u8) -> (ChewingTextService, ComObject<Tsf>) {
+    let (mut service, tsf, _) = fixture(0, 0);
+    service.cfg.chewing_tsf.ctrl_symbol_new_phonetic = enabled;
+    service.cfg.save_reg();
+    service.cfg = Config::from_reg().unwrap();
+    service.chewing_editor = service
+        .configure_loaded_editor(
+            &service.cfg.chewing_tsf,
+            super::super::d512::tests::editor(),
+        )
+        .unwrap();
+    match content {
+        0 => {
+            service.composition.replace(None);
+        }
+        1 => super::super::d512::tests::type_reading(&mut service.chewing_editor),
+        2 => {
+            service
+                .chewing_editor
+                .process_keyevent(chewing::input::keymap::map_ascii(
+                    &chewing::input::keymap::QWERTY_MAP,
+                    b'2',
+                ));
+            assert!(!service.chewing_editor.syllable_buffer().is_empty());
+        }
+        3 => {} // A stale TSF composition with both engine buffers empty.
+        _ => unreachable!(),
+    }
+    (service, tsf)
+}
+
+#[test]
+fn input_habits_ctrl_symbols_route_both_entries_and_insert_once() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for (vk, scan, ascii, symbol) in CTRL_SYMBOLS {
+        let (mut s, t) = input_habits_fixture(true, 1);
+        let ctx = t.cast().unwrap();
+        let ev = event(vk, scan, ascii, 2);
+        let text = s.chewing_editor.display();
+        for _ in 0..2 {
+            assert!(
+                s.on_test_keydown(&ctx, ev).unwrap(),
+                "Ctrl+{}",
+                ascii as char
+            );
+        }
+        assert_eq!(s.chewing_editor.display(), text);
+        assert_eq!(t.edits.get(), 0);
+        assert!(s.on_keydown(&ctx, ev).unwrap());
+        assert_eq!(s.chewing_editor.display(), format!("{text}{symbol}"));
+        assert_eq!(s.chewing_editor.display_commit(), "");
+    }
+}
+
+#[test]
+fn input_habits_unfinished_syllable_is_consumed_without_insertion() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for (vk, scan, ascii, _) in CTRL_SYMBOLS {
+        let (mut s, t) = input_habits_fixture(true, 2);
+        let ctx = t.cast().unwrap();
+        let before = s.chewing_editor.syllable_buffer();
+        let ev = event(vk, scan, ascii, 2);
+        assert!(s.on_test_keydown(&ctx, ev).unwrap());
+        assert!(s.on_keydown(&ctx, ev).unwrap());
+        assert_eq!(
+            s.chewing_editor.last_key_behavior(),
+            EditorKeyBehavior::Bell
+        );
+        assert_eq!(s.chewing_editor.syllable_buffer(), before);
+        assert!(s.chewing_editor.is_empty());
+        assert_eq!(s.chewing_editor.display_commit(), "");
+    }
+}
+
+#[test]
+fn input_habits_native_shortcuts_stay_native() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for (enabled, content, modifiers, ascii) in [
+        (true, 0, 2, b'['),
+        (true, 3, 2, b'['),
+        (false, 1, 2, b'['),
+        (true, 1, 2, b'/'),
+        (true, 1, 2 | 1, b'['),
+        (true, 1, 2 | 4, b'['),
+        (true, 1, 2 | 8, b'['),
+        (true, 1, 2 | 16, b'['),
+    ] {
+        let (mut s, t) = input_habits_fixture(enabled, content);
+        let ctx = t.cast().unwrap();
+        let before = s.chewing_editor.display();
+        let ev = event(
+            if ascii == b'/' { 0xbf } else { 0xdb },
+            0x1a,
+            ascii,
+            modifiers,
+        );
+        assert!(!s.on_test_keydown(&ctx, ev).unwrap());
+        assert!(!s.on_keydown(&ctx, ev).unwrap());
+        assert_eq!(s.chewing_editor.display(), before);
+        assert_eq!(t.edits.get(), 0);
+    }
+}
+
+#[test]
+fn input_habits_existing_ctrl_digit_and_easy_symbol_routing_is_preserved() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t) = input_habits_fixture(true, 1);
+    let ctx = t.cast().unwrap();
+    assert!(s.on_test_keydown(&ctx, event(0x31, 2, b'1', 2)).unwrap());
+    s.cfg.chewing_tsf.easy_symbols_with_shift_ctrl = true;
+    assert!(s.on_test_keydown(&ctx, event(0x41, 0x1e, b'A', 3)).unwrap());
+}
+
+#[test]
+fn input_habits_ctrl_probe_preserves_pending_config_and_d512_state() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, calls) = fixture(2, 0);
+    let ctx = t.cast().unwrap();
+    CURRENT_USER
+        .create("Software\\ChewingTextService")
+        .unwrap()
+        .set_u32("CtrlSymbolNewPhonetic", 0)
+        .unwrap();
+    let before = calls.load(Ordering::SeqCst);
+    let epoch = s.d512_hint.epoch.get();
+    let cursor = s.chewing_editor.cursor();
+    let options = s.chewing_editor.editor_options().ctrl_symbol_new_phonetic;
+    for _ in 0..2 {
+        assert!(s.on_test_keydown(&ctx, event(0xdb, 0x1a, b'[', 2)).unwrap());
+    }
+    assert!(s.cfg.chewing_tsf.ctrl_symbol_new_phonetic);
+    assert_eq!(
+        s.chewing_editor.editor_options().ctrl_symbol_new_phonetic,
+        options
+    );
+    assert_eq!(s.chewing_editor.cursor(), cursor);
+    assert_eq!(s.chewing_editor.display(), "代表");
+    assert_eq!(
+        s.chewing_editor
+            .d512_report()
+            .unwrap()
+            .suggestion
+            .unwrap()
+            .text,
+        "代錶"
+    );
+    assert_eq!(calls.load(Ordering::SeqCst), before);
+    assert_eq!(s.d512_hint.epoch.get(), epoch);
+    assert_eq!(t.edits.get(), 0);
+}
+
+#[test]
+fn input_habits_cursor_wrap_setting_reaches_configured_editor() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (s, _, _) = fixture(0, 0);
+    for wrap in [false, true] {
+        let cfg = ChewingTsfConfig {
+            d512_mode: 0,
+            cursor_wrap: wrap,
+            ..Default::default()
+        };
+        let mut editor = s
+            .configure_loaded_editor(&cfg, super::super::d512::tests::editor())
+            .unwrap();
+        super::super::d512::tests::type_reading(&mut editor);
+        editor.process_keyevent(KeyboardEvent::builder().ksym(keysym::SYM_HOME).build());
+        editor.process_keyevent(KeyboardEvent::builder().ksym(keysym::SYM_LEFT).build());
+        assert_eq!(editor.cursor(), if wrap { editor.len() } else { 0 });
+    }
+}
+
+#[test]
+fn input_habits_punctuation_keysyms_follow_layout_not_oem_vk() {
+    for (vk, scan, ascii, _) in CTRL_SYMBOLS {
+        let ev = event(vk, scan, ascii, 2).to_keyboard_event(KeymapOp::None);
+        assert_eq!(ev.ksym.0, ascii as u32);
+        assert!(ev.is_state_on(KeyState::Control));
+    }
+    // Simulated Dvorak maps physical US minus/equal to brackets. Their VKs
+    // are not VK_OEM_4/6; the translated keysym is the engine input.
+    for (vk, scan, ascii, want) in [(0xbd, 0x0c, b'-', '['), (0xbb, 0x0d, b'=', ']')] {
+        let ev = event(vk, scan, ascii, 2).to_keyboard_event(KeymapOp::Code(&INVERTED_DVORAK_MAP));
+        assert_eq!(ev.ksym.0, want as u32);
+        assert!(ev.is_state_on(KeyState::Control));
+    }
+    // A keyboard layout can use the US bracket VK for another character.
+    assert_eq!(
+        event(0xdb, 0x1a, b'@', 2)
+            .to_keyboard_event(KeymapOp::None)
+            .ksym
+            .0,
+        b'@' as u32
+    );
+}
+
+#[test]
+fn input_habits_right_win_is_a_chord_modifier() {
+    let ev = event(0xdb, 0x1a, b'[', 2 | 16).to_keyboard_event(KeymapOp::None);
+    assert!(ev.is_state_on(KeyState::Super));
 }
 #[test]
 fn key_route_entries_preserve_native_shortcut_and_readonly_rejections() {

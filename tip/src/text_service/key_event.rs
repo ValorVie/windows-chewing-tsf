@@ -9,7 +9,7 @@ use chewing::input::keymap::{
 use chewing::input::{KeyboardEvent, keysym::*};
 use windows::Win32::UI::Input::KeyboardAndMouse::{
     GetKeyboardState, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToAscii, VIRTUAL_KEY, VK_CAPITAL,
-    VK_CONTROL, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_SHIFT,
+    VK_CONTROL, VK_LWIN, VK_MENU, VK_NUMLOCK, VK_RWIN, VK_SHIFT,
 };
 
 #[derive(Debug, Clone, Copy)]
@@ -98,7 +98,7 @@ impl SystemKeyboardEvent {
             .alt_if(self.is_key_down(VK_MENU))
             .caps_lock_if(self.is_key_toggled(VK_CAPITAL))
             .num_lock_if(self.is_key_toggled(VK_NUMLOCK))
-            .super_if(self.is_key_down(VK_LWIN))
+            .super_if(self.is_key_down(VK_LWIN) || self.is_key_down(VK_RWIN))
             .build()
     }
 }

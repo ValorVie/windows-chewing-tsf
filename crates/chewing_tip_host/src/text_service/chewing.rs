@@ -271,6 +271,8 @@ fn build_editor_from_cfg(cfg: &ChewingTsfConfig) -> Result<Editor, TipError> {
             opt.auto_shift_cursor = cfg.advance_after_selection;
             opt.candidates_per_page = cfg.cand_per_page as usize;
             opt.esc_clear_all_buffer = cfg.esc_clean_all_buf;
+            opt.ctrl_symbol_new_phonetic = cfg.ctrl_symbol_new_phonetic;
+            opt.cursor_wrap = cfg.cursor_wrap;
             opt.space_is_select_key = cfg.show_cand_with_space_key;
             opt.disable_auto_learn_phrase = !cfg.enable_auto_learn;
             opt.enable_fullwidth_toggle_key = cfg.enable_fullwidth_toggle_key;
