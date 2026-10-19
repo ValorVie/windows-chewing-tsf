@@ -76,6 +76,171 @@ fn assert_input_habits(cfg: &Config, ctrl_symbol: bool, cursor_wrap: bool) {
     assert_eq!(value["cursor_wrap"], json!(cursor_wrap));
 }
 
+fn assert_personal_pref(cfg: &Config, enabled: bool, automatic: f64, suggest: f64) {
+    let value = serde_json::to_value(&cfg.chewing_tsf).unwrap();
+    assert_eq!(value["use_personal_candidate_preference"], json!(enabled));
+    assert_eq!(value["d512_personal_bonus"], json!(automatic));
+    assert_eq!(value["d512_suggest_personal_bonus"], json!(suggest));
+}
+
+#[test]
+fn personal_pref_missing_registry_values_use_and_save_defaults() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    assert_personal_pref(&Config::default(), true, 2., 2.);
+    let cfg = Config::from_reg().unwrap();
+    assert_personal_pref(&cfg, true, 2., 2.);
+    assert!(key.get_u32("UsePersonalCandidatePreference").is_err());
+    assert!(key.get_string("D512PersonalBonus").is_err());
+    assert!(key.get_string("D512SuggestPersonalBonus").is_err());
+    cfg.save_reg();
+    assert_eq!(key.get_u32("UsePersonalCandidatePreference").unwrap(), 1);
+    assert_eq!(key.get_string("D512PersonalBonus").unwrap(), "2");
+    assert_eq!(key.get_string("D512SuggestPersonalBonus").unwrap(), "2");
+}
+
+#[test]
+fn personal_pref_reads_dword_and_independent_decimal_bonuses() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for (enabled, automatic, suggest) in [(0, "0", "1.25"), (1, "0.5", "0"), (7, "3.75", "4.125")] {
+        key.set_u32("UsePersonalCandidatePreference", enabled)
+            .unwrap();
+        key.set_string("D512PersonalBonus", automatic).unwrap();
+        key.set_string("D512SuggestPersonalBonus", suggest).unwrap();
+        assert_personal_pref(
+            &Config::from_reg().unwrap(),
+            enabled > 0,
+            automatic.parse().unwrap(),
+            suggest.parse().unwrap(),
+        );
+    }
+}
+
+#[test]
+fn personal_pref_save_roundtrips_without_overwriting_existing_settings() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    for (enabled, automatic, suggest) in [(false, 0., 3.75), (true, 4.125, 0.)] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["use_personal_candidate_preference"] = json!(enabled);
+        value["chewing_tsf"]["d512_personal_bonus"] = json!(automatic);
+        value["chewing_tsf"]["d512_suggest_personal_bonus"] = json!(suggest);
+        let mut cfg: Config = serde_json::from_value(value).unwrap();
+        cfg.chewing_tsf.d512_mode = 2;
+        cfg.chewing_tsf.d512_weight = 0.375;
+        cfg.chewing_tsf.d512_margin = 0.625;
+        cfg.chewing_tsf.d512_suggest_weight = 0.5;
+        cfg.chewing_tsf.d512_suggest_margin = 3.;
+        cfg.chewing_tsf.d512_log_calibration = 1;
+        cfg.chewing_tsf.d512_suggestion_accept_key = 2;
+        cfg.chewing_tsf.cursor_wrap = true;
+        cfg.save_reg();
+        assert_eq!(
+            key.get_u32("UsePersonalCandidatePreference").unwrap(),
+            u32::from(enabled)
+        );
+        assert_eq!(
+            key.get_string("D512PersonalBonus").unwrap(),
+            automatic.to_string()
+        );
+        assert_eq!(
+            key.get_string("D512SuggestPersonalBonus").unwrap(),
+            suggest.to_string()
+        );
+        let loaded = Config::from_reg().unwrap();
+        assert_personal_pref(&loaded, enabled, automatic, suggest);
+        assert_settings(&loaded, 2, 0.375, 0.625);
+        assert_eq!(loaded.chewing_tsf.d512_suggest_weight, 0.5);
+        assert_eq!(loaded.chewing_tsf.d512_suggest_margin, 3.);
+        assert_eq!(loaded.chewing_tsf.d512_log_calibration, 1);
+        assert_eq!(loaded.chewing_tsf.d512_suggestion_accept_key, 2);
+        assert_input_habits(&loaded, true, true);
+    }
+}
+
+#[test]
+fn personal_pref_invalid_registry_values_fall_back_independently() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_u32("UsePersonalCandidatePreference", 0).unwrap();
+    for invalid in ["", "invalid", "NaN", "inf", "-inf", "1e999", "-0.01", "-1"] {
+        key.set_string("D512PersonalBonus", invalid).unwrap();
+        key.set_string("D512SuggestPersonalBonus", "3.75").unwrap();
+        assert_personal_pref(&Config::from_reg().unwrap(), false, 2., 3.75);
+        key.set_string("D512PersonalBonus", "4.125").unwrap();
+        key.set_string("D512SuggestPersonalBonus", invalid).unwrap();
+        assert_personal_pref(&Config::from_reg().unwrap(), false, 4.125, 2.);
+    }
+    key.set_string("UsePersonalCandidatePreference", "0")
+        .unwrap();
+    key.set_u32("D512PersonalBonus", 3).unwrap();
+    key.set_u64("D512SuggestPersonalBonus", 4).unwrap();
+    assert_personal_pref(&Config::from_reg().unwrap(), true, 2., 2.);
+}
+
+#[test]
+fn personal_pref_survives_unrelated_config_save() {
+    let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let registry = IsolatedRegistry::new();
+    let key = registry.settings();
+    key.set_u32("UsePersonalCandidatePreference", 0).unwrap();
+    key.set_string("D512PersonalBonus", "0.75").unwrap();
+    key.set_string("D512SuggestPersonalBonus", "3.5").unwrap();
+    let mut cfg = Config::from_reg().unwrap();
+    cfg.chewing_tsf.font_size = 19;
+    cfg.chewing_tsf.d512_mode = 0;
+    cfg.chewing_tsf.esc_clean_all_buf = true;
+    cfg.save_reg();
+    assert_personal_pref(&Config::from_reg().unwrap(), false, 0.75, 3.5);
+    assert_eq!(key.get_u32("UsePersonalCandidatePreference").unwrap(), 0);
+    assert_eq!(key.get_string("D512PersonalBonus").unwrap(), "0.75");
+    assert_eq!(key.get_string("D512SuggestPersonalBonus").unwrap(), "3.5");
+    assert_eq!(key.get_u32("DefFontSize").unwrap(), 19);
+    assert_eq!(key.get_u32("D512Mode").unwrap(), 0);
+    assert_eq!(key.get_u32("EscCleanAllBuf").unwrap(), 1);
+}
+
+#[test]
+fn personal_pref_older_json_defaults_only_missing_fields() {
+    for missing in [
+        &["use_personal_candidate_preference"][..],
+        &["d512_personal_bonus"][..],
+        &["d512_suggest_personal_bonus"][..],
+        &[
+            "use_personal_candidate_preference",
+            "d512_personal_bonus",
+            "d512_suggest_personal_bonus",
+        ][..],
+    ] {
+        let mut value = serde_json::to_value(Config::default()).unwrap();
+        value["chewing_tsf"]["use_personal_candidate_preference"] = json!(false);
+        value["chewing_tsf"]["d512_personal_bonus"] = json!(0.75);
+        value["chewing_tsf"]["d512_suggest_personal_bonus"] = json!(3.5);
+        for field in missing {
+            value["chewing_tsf"].as_object_mut().unwrap().remove(*field);
+        }
+        assert_personal_pref(
+            &serde_json::from_value(value).unwrap(),
+            missing.contains(&"use_personal_candidate_preference"),
+            if missing.contains(&"d512_personal_bonus") {
+                2.
+            } else {
+                0.75
+            },
+            if missing.contains(&"d512_suggest_personal_bonus") {
+                2.
+            } else {
+                3.5
+            },
+        );
+    }
+}
+
 #[test]
 fn input_habits_missing_registry_values_use_and_save_tsf_defaults() {
     let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());

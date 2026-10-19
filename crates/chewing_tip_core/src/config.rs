@@ -54,6 +54,8 @@ pub struct ChewingTsfConfig {
     pub lock_chinese_on_caps_lock: bool,
     pub show_notification: bool,
     pub enable_auto_learn: bool,
+    #[serde(default = "default_use_personal_candidate_preference")]
+    pub use_personal_candidate_preference: bool,
     pub esc_clean_all_buf: bool,
     #[serde(default = "default_ctrl_symbol_new_phonetic")]
     pub ctrl_symbol_new_phonetic: bool,
@@ -88,6 +90,10 @@ pub struct ChewingTsfConfig {
     pub d512_suggest_weight: f64,
     #[serde(default = "default_d512_suggest_margin")]
     pub d512_suggest_margin: f64,
+    #[serde(default = "default_d512_personal_bonus")]
+    pub d512_personal_bonus: f64,
+    #[serde(default = "default_d512_personal_bonus")]
+    pub d512_suggest_personal_bonus: f64,
     pub cand_per_row: i32,
     pub cand_per_page: i32,
     pub font_size: i32,
@@ -113,6 +119,14 @@ pub struct ChewingTsfConfig {
 
 fn default_ctrl_symbol_new_phonetic() -> bool {
     true
+}
+
+fn default_use_personal_candidate_preference() -> bool {
+    true
+}
+
+fn default_d512_personal_bonus() -> f64 {
+    2.0
 }
 
 fn default_d512_mode() -> i32 {
@@ -144,6 +158,7 @@ impl Default for ChewingTsfConfig {
             lock_chinese_on_caps_lock: true,
             show_notification: true,
             enable_auto_learn: true,
+            use_personal_candidate_preference: default_use_personal_candidate_preference(),
             esc_clean_all_buf: false,
             ctrl_symbol_new_phonetic: default_ctrl_symbol_new_phonetic(),
             cursor_wrap: false,
@@ -169,6 +184,8 @@ impl Default for ChewingTsfConfig {
             d512_margin: default_d512_margin(),
             d512_suggest_weight: default_d512_suggest_weight(),
             d512_suggest_margin: default_d512_suggest_margin(),
+            d512_personal_bonus: default_d512_personal_bonus(),
+            d512_suggest_personal_bonus: default_d512_personal_bonus(),
             cand_per_row: 3,
             cand_per_page: 9,
             font_size: 16,
@@ -377,6 +394,12 @@ impl Config {
             if let Ok(value) = reg_get_f64(&key, "D512SuggestMargin") {
                 cfg.d512_suggest_margin = value;
             }
+            if let Ok(value) = reg_get_f64(&key, "D512PersonalBonus") {
+                cfg.d512_personal_bonus = value;
+            }
+            if let Ok(value) = reg_get_f64(&key, "D512SuggestPersonalBonus") {
+                cfg.d512_suggest_personal_bonus = value;
+            }
             if let Ok(value) = reg_get_i32(&key, "SelAreaLen") {
                 cfg.cand_per_page = value;
             }
@@ -394,6 +417,9 @@ impl Config {
             }
             if let Ok(value) = reg_get_bool(&key, "EnableAutoLearn") {
                 cfg.enable_auto_learn = value;
+            }
+            if let Ok(value) = reg_get_bool(&key, "UsePersonalCandidatePreference") {
+                cfg.use_personal_candidate_preference = value;
             }
             if let Ok(value) = reg_get_bool(&key, "FullShapeSymbols") {
                 cfg.full_shape_symbols = value;
@@ -545,6 +571,14 @@ impl Config {
             "D512SuggestMargin",
             chewing_tsf.d512_suggest_margin.to_string(),
         );
+        let _ = key.set_string(
+            "D512PersonalBonus",
+            chewing_tsf.d512_personal_bonus.to_string(),
+        );
+        let _ = key.set_string(
+            "D512SuggestPersonalBonus",
+            chewing_tsf.d512_suggest_personal_bonus.to_string(),
+        );
         let _ = reg_set_i32(&key, "SelAreaLen", chewing_tsf.cand_per_page);
         let _ = reg_set_bool(&key, "CursorCandList", chewing_tsf.cursor_cand_list);
         let _ = reg_set_bool(
@@ -582,6 +616,11 @@ impl Config {
             chewing_tsf.upper_case_with_shift,
         );
         let _ = reg_set_bool(&key, "EnableAutoLearn", chewing_tsf.enable_auto_learn);
+        let _ = reg_set_bool(
+            &key,
+            "UsePersonalCandidatePreference",
+            chewing_tsf.use_personal_candidate_preference,
+        );
         let _ = key.set_string(
             "AutoCheckUpdateChannel",
             &chewing_tsf.auto_check_update_channel,
