@@ -52,12 +52,15 @@ $preferencesRef = '<設定程式的完整 40 位 commit SHA>'
 每次都驗素材雜湊；同一組來源、版本與工具會沿用已驗證的成品，避免重打包改變 MSI 雜湊。
 失敗時保留 log 與暫存路徑，成功才清除暫存工作目錄。
 
-使用者試用通過後，先登入 GitHub CLI，確認 HEAD 已推到 `origin/valor-feature`，再發佈：
+使用者試用通過後，先登入 GitHub CLI，確認 HEAD 已推到 `origin/valor-feature`，
+把這版使用者看得到的變更寫成 Markdown 清單，再發佈：
 
 ```powershell
 gh auth login
-.\scripts\release.ps1 -Version $version -PreferencesRef $preferencesRef -Publish
+.\scripts\release.ps1 -Version $version -PreferencesRef $preferencesRef -ChangesFile .\changes.md -Publish
 ```
+
+`-ChangesFile` 的內容會放在 Release 說明的「本版變更」，建置來源放在後面；沒給或內容空白就在建置前停止。
 
 `-Publish` 才會建立／推送 `v<Version>` tag 並建立預覽版 Release，附 MSI 及 `.msi.sha256`。
 既有 tag 指向別處或 Release 資產不同就停止；相同資產不重傳，不 force push、不覆蓋或刪除。

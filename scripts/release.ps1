@@ -13,7 +13,8 @@ Flow: validate clean HEAD/tools; create a detached temporary worktree; clone the
  package tasks. Version files change only in the temporary worktree.
 
 Without -Publish this is a preview and does not need gh or authentication.
--Publish also requires gh auth login and HEAD = origin/valor-feature. It pushes
+-Publish also requires gh auth login, HEAD = origin/valor-feature and -ChangesFile
+ (a Markdown list of user-visible changes, shown above the build provenance). It pushes
  only the annotated version tag and creates a prerelease with MSI/checksum.
  Existing tags/assets at another commit/hash stop; no force, deletion or clobber.
 
@@ -38,6 +39,7 @@ param(
     [string]$Version,
     [string]$PreferencesRef,
     [string]$CacheDir,
+    [string]$ChangesFile,
     [switch]$Publish,
     [switch]$SelfTest
 )
@@ -82,6 +84,11 @@ function Assert-Rejected([scriptblock]$Action, [string]$Message) {
     }
     throw 'Expected rejection'
 }
+function Join-ReleaseNotes([string]$Notes, [string]$Changes) {
+    if (-not $Changes -or -not $Changes.Trim()) { throw 'Release changes are empty' }
+    $title, $rest = $Notes -split "`n", 2
+    return ($title + "`n`n## 本版變更`n`n" + $Changes.Trim() + "`n`n## 建置來源`n" + $rest)
+}
 function Invoke-SelfTests {
     $a = 'a' * 40
     $b = 'b' * 40
@@ -106,7 +113,9 @@ function Invoke-SelfTests {
         @{ Name = 'checksum conflict'; Run = { Assert-Rejected { Get-ReleasePlan $true $true $false 'm' 'm' 's' 'x' } 'Release conflict' } },
         @{ Name = 'missing asset'; Run = { Assert-Rejected { Get-ReleasePlan $true $true $false 'm' '' 's' '' } 'Release conflict' } },
         @{ Name = 'same stable release'; Run = { Assert-Equal (Get-ReleasePlan $true $false $false 'm' 'm' 's' 's') 'Reuse' } },
-        @{ Name = 'same draft release'; Run = { Assert-Equal (Get-ReleasePlan $true $true $true 'm' 'm' 's' 's') 'Reuse' } }
+        @{ Name = 'same draft release'; Run = { Assert-Equal (Get-ReleasePlan $true $true $true 'm' 'm' 's' 's') 'Reuse' } },
+        @{ Name = 'notes changes'; Run = { Assert-Equal (Join-ReleaseNotes "# T`n`nbody" "- a`n") "# T`n`n## 本版變更`n`n- a`n`n## 建置來源`n`nbody" } },
+        @{ Name = 'notes empty changes'; Run = { Assert-Rejected { Join-ReleaseNotes "# T" " `n" } 'Release changes are empty' } }
     )
     $passed = 0
     $failed = 0
@@ -320,7 +329,9 @@ function Publish-Result($Result, [string]$Head, [string]$Tag, [string]$Temporary
     }
     if ($tagPlan -ne 'Reuse') { [void](Invoke-Tool 'git.exe' @('push','origin',('refs/tags/' + $Tag))) }
     if ($releasePlan -eq 'Create') {
-        [void](Invoke-Tool 'gh.exe' @('release','create',$Tag,$Result.MsiPath,$Result.SumPath,'--repo',$script:ReleaseRepo,'--prerelease','--verify-tag','--title',('預覽版 ' + $Version),'--notes-file',$Result.NotesPath))
+        $notesPath = Join-Path $Temporary 'release-notes-publish.md'
+        Write-Utf8 $notesPath (Join-ReleaseNotes ([IO.File]::ReadAllText($Result.NotesPath)) $script:Changes)
+        [void](Invoke-Tool 'gh.exe' @('release','create',$Tag,$Result.MsiPath,$Result.SumPath,'--repo',$script:ReleaseRepo,'--prerelease','--verify-tag','--title',('預覽版 ' + $Version),'--notes-file',$notesPath))
     } else { Write-Log 'Release assets match: no upload or overwrite' }
 }
 
@@ -329,6 +340,12 @@ function Invoke-Release {
     $parsed = Convert-ReleaseVersion $Version
     if ($PreferencesRef -notmatch '^[a-fA-F0-9]{40}$') { throw 'PreferencesRef must be a full 40-character commit SHA' }
     $PreferencesRef = $PreferencesRef.ToLowerInvariant()
+    if ($Publish) {
+        # Fail before the long build: every published Release must say what changed.
+        if (-not $ChangesFile) { throw 'Publish requires -ChangesFile' }
+        $script:Changes = [IO.File]::ReadAllText((Resolve-Path -LiteralPath $ChangesFile).Path)
+        [void](Join-ReleaseNotes '' $script:Changes)
+    }
     $script:RepoRoot = Get-Git @('rev-parse','--show-toplevel') $script:RepoRoot
     if (Get-Git @('status','--porcelain','--untracked-files=all')) { throw 'The source worktree must be clean, including untracked files' }
     $head = Get-Git @('rev-parse','HEAD')
