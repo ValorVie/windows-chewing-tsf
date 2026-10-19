@@ -118,7 +118,7 @@ pub struct ChewingTsfConfig {
 }
 
 fn default_ctrl_symbol_new_phonetic() -> bool {
-    true
+    false
 }
 
 fn default_use_personal_candidate_preference() -> bool {

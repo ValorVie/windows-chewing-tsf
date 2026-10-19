@@ -158,7 +158,7 @@ fn personal_pref_save_roundtrips_without_overwriting_existing_settings() {
         assert_eq!(loaded.chewing_tsf.d512_suggest_margin, 3.);
         assert_eq!(loaded.chewing_tsf.d512_log_calibration, 1);
         assert_eq!(loaded.chewing_tsf.d512_suggestion_accept_key, 2);
-        assert_input_habits(&loaded, true, true);
+        assert_input_habits(&loaded, false, true);
     }
 }
 
@@ -246,13 +246,13 @@ fn input_habits_missing_registry_values_use_and_save_tsf_defaults() {
     let _lock = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
     let registry = IsolatedRegistry::new();
     let key = registry.settings();
-    assert_input_habits(&Config::default(), true, false);
+    assert_input_habits(&Config::default(), false, false);
     let cfg = Config::from_reg().unwrap();
-    assert_input_habits(&cfg, true, false);
+    assert_input_habits(&cfg, false, false);
     assert!(key.get_u32("CtrlSymbolNewPhonetic").is_err());
     assert!(key.get_u32("CursorWrap").is_err());
     cfg.save_reg();
-    assert_eq!(key.get_u32("CtrlSymbolNewPhonetic").unwrap(), 1);
+    assert_eq!(key.get_u32("CtrlSymbolNewPhonetic").unwrap(), 0);
     assert_eq!(key.get_u32("CursorWrap").unwrap(), 0);
 }
 
@@ -323,16 +323,16 @@ fn input_habits_survive_unrelated_config_save() {
 #[test]
 fn input_habits_older_json_uses_defaults_for_missing_fields_only() {
     for (missing, ctrl_symbol, cursor_wrap) in [
-        (&["ctrl_symbol_new_phonetic"][..], true, true),
-        (&["cursor_wrap"][..], false, false),
+        (&["ctrl_symbol_new_phonetic"][..], false, true),
+        (&["cursor_wrap"][..], true, false),
         (
             &["ctrl_symbol_new_phonetic", "cursor_wrap"][..],
-            true,
+            false,
             false,
         ),
     ] {
         let mut value = serde_json::to_value(Config::default()).unwrap();
-        value["chewing_tsf"]["ctrl_symbol_new_phonetic"] = json!(false);
+        value["chewing_tsf"]["ctrl_symbol_new_phonetic"] = json!(true);
         value["chewing_tsf"]["cursor_wrap"] = json!(true);
         for field in missing {
             value["chewing_tsf"].as_object_mut().unwrap().remove(*field);

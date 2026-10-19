@@ -387,6 +387,8 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
     };
     let mut cfg = Config::default();
     cfg.chewing_tsf.d512_mode = mode;
+    // Routing tests exercise Ctrl symbols; the TSF default is off.
+    cfg.chewing_tsf.ctrl_symbol_new_phonetic = true;
     cfg.chewing_tsf.use_personal_candidate_preference = false;
     cfg.chewing_tsf.d512_suggestion_accept_key = key;
     cfg.chewing_tsf.show_notification = false;
