@@ -44,8 +44,14 @@ conversion or added output text rejects learning when it changes the original
 commit. A composition prefix also needs its full UTF-16 range shift to succeed.
 Turning the preference off revokes pending learning; callbacks after editor
 teardown discard their receipts without keeping the store alive. See the
-engine's [personal preference contract](https://github.com/ValorVie/libchewing/blob/4e8cfd000fac3b5d0ac75630b92a8e5e3407c158/docs/personal-candidate-preference.md)
+engine's [personal preference contract](https://github.com/ValorVie/libchewing/blob/b51924d80252013f9fc64f12804022c4098efdf8/docs/personal-candidate-preference.md)
 for storage, candidate ordering and lifecycle flush limits.
+
+Settings reload and thread focus still construct a replacement editor before
+dropping the old one. Editors with the same user path share a preference store,
+so these rebuilds keep its worker alive. The TIP does not call `Editor::flush()`
+from keys, edit-session callbacks or focus handlers. Final store teardown can
+still wait for persistence during deactivation or process exit.
 
 `D512LogCalibration` is a DWORD (0 off by default, 1 on), stored unchanged in
 `ChewingTsfConfig::d512_log_calibration`. The TIP collects only when D512 is on

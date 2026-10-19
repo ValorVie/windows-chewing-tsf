@@ -1264,6 +1264,161 @@ fn personal_u2_drain(t: &ComObject<Tsf>) {
         let _ = unsafe { session.DoEditSession(0) };
     }
 }
+
+fn personal_fix1_rebuild_under_lock(route: &str) {
+    use chewing::input::keymap::{QWERTY_MAP, map_ascii};
+    use std::{fs, process::Command, sync::mpsc, thread, time::Duration};
+
+    // A subprocess gives the real builder private factory/user paths without
+    // changing process-wide environment variables while other tests are running.
+    if std::env::var("C2_PERSONAL_FIX1_ROUTE").as_deref() != Ok(route) {
+        use chewing::{
+            dictionary::StringTableBuilder,
+            lm::{StaticDictBuilder, StaticLmCompiler},
+        };
+        let root = std::env::temp_dir().join(format!(
+            "chewing-personal-fix1-{}-{}",
+            std::process::id(),
+            SERIAL.fetch_add(1, Ordering::Relaxed)
+        ));
+        let factory = root.join("factory");
+        fs::create_dir_all(&factory).unwrap();
+        // Empty factory dictionaries are sufficient for the two synthetic user
+        // entries below; both rebuilds still use Editor::chewing(None, None).
+        for name in ["static_dict.bin", "rare_dict.bin"] {
+            StaticDictBuilder::new()
+                .to_writer(fs::File::create(factory.join(name)).unwrap())
+                .unwrap();
+        }
+        StringTableBuilder::new()
+            .to_writer(fs::File::create(factory.join("static_words.bin")).unwrap())
+            .unwrap();
+        StaticLmCompiler::new()
+            .to_writer(fs::File::create(factory.join("static_lm.bin")).unwrap())
+            .unwrap();
+        let test = format!(
+            "text_service::chewing::key_routing_tests::personal_fix1_{route}_rebuild_returns_while_preference_file_is_locked"
+        );
+        let output = Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &test, "--nocapture"])
+            .env("C2_PERSONAL_FIX1_ROUTE", route)
+            .env("CHEWING_PATH", factory)
+            .env("CHEWING_USER_PATH", root.join("user"))
+            .output()
+            .unwrap();
+        fs::remove_dir_all(root).unwrap();
+        assert!(
+            output.status.success() && String::from_utf8_lossy(&output.stdout).contains("1 passed"),
+            "{route} child failed:\n{}\n{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        return;
+    }
+
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, _) = fixture(0, 0);
+    s.cfg.chewing_tsf.use_personal_candidate_preference = true;
+    s.cfg.chewing_tsf.enable_auto_learn = false;
+    s.cfg.chewing_tsf.phrase_choice_rearward = true;
+    s.cfg.save_reg();
+    s.cfg = Config::from_reg().unwrap();
+    s.chewing_editor = s.build_editor_from_cfg(&s.cfg.chewing_tsf).unwrap();
+    for word in ["代", "帶"] {
+        s.chewing_editor
+            .user_dict()
+            .insert(&[chewing::syl![D, AI, TONE4]], word);
+    }
+    s.chewing_editor.flush(); // Test setup only: finish initial loading before locking.
+    let dir = chewing::path::SearchPath::from_env()
+        .user_versioned_path()
+        .unwrap();
+    let lock_path = dir.join("candidate-ranking.json.lock");
+    let (ready, wait_ready) = mpsc::channel();
+    let (start, wait_start) = mpsc::channel();
+    let (done, wait_done) = mpsc::channel();
+    let blocker = thread::spawn(move || {
+        let lock = fs::OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .write(true)
+            .open(lock_path)
+            .unwrap();
+        lock.lock().unwrap();
+        ready.send(()).unwrap();
+        // Always release the lock, including a failure/panic in the test caller.
+        let quick = wait_start.recv_timeout(Duration::from_secs(5)).is_ok()
+            && wait_done.recv_timeout(Duration::from_millis(200)).is_ok();
+        drop(lock);
+        quick
+    });
+    wait_ready.recv_timeout(Duration::from_secs(5)).unwrap();
+    for key in b"294" {
+        s.chewing_editor
+            .process_keyevent(map_ascii(&QWERTY_MAP, *key));
+    }
+    s.chewing_editor.start_selecting().unwrap();
+    let index = s
+        .chewing_editor
+        .all_candidates()
+        .unwrap()
+        .iter()
+        .position(|word| word == "帶")
+        .unwrap();
+    s.chewing_editor.select(index).unwrap();
+    t.execute_sessions.set(true);
+    s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+        .unwrap();
+    assert_eq!(*t.document.text.borrow(), "帶");
+
+    // Only the held-lock observation is timed, excluding setup and final-owner
+    // teardown. This is a blocking regression, not a normal latency benchmark.
+    let changed_wrap = !s.cfg.chewing_tsf.cursor_wrap;
+    if route == "reload" {
+        let mut changed = Config::from_reg().unwrap();
+        changed.chewing_tsf.cursor_wrap = changed_wrap;
+        changed.save_reg();
+    } else {
+        // A no-op focus handler must fail the reloaded-options assertion too.
+        s.chewing_editor
+            .set_editor_options(|opt| opt.cursor_wrap = changed_wrap);
+    }
+    start.send(()).unwrap();
+    let result = if route == "reload" {
+        // Unhandled F12 still traverses the real next-key configuration reload.
+        s.on_keydown(&t.cast().unwrap(), event(VK_F12.0, 0x58, 0, 0))
+            .map(|handled| assert!(!handled))
+    } else {
+        s.on_thread_focus()
+    };
+    let _ = done.send(());
+    let quick = blocker.join().unwrap();
+    result.unwrap();
+    if route == "reload" {
+        assert_eq!(s.cfg.chewing_tsf.cursor_wrap, changed_wrap);
+    }
+    assert_eq!(
+        s.chewing_editor.editor_options().cursor_wrap,
+        s.cfg.chewing_tsf.cursor_wrap
+    );
+    drop(s); // Final owner may wait; the lock has already been released.
+    let json: serde_json::Value =
+        serde_json::from_slice(&fs::read(dir.join("candidate-ranking.json")).unwrap()).unwrap();
+    assert_eq!(json["groups"][0]["counts"]["帶"], 1);
+    assert!(quick, "{route} rebuild waited for the preference file lock");
+}
+
+#[test]
+fn personal_fix1_reload_rebuild_returns_while_preference_file_is_locked() {
+    personal_fix1_rebuild_under_lock("reload");
+}
+
+#[test]
+fn personal_fix1_focus_rebuild_returns_while_preference_file_is_locked() {
+    personal_fix1_rebuild_under_lock("focus");
+}
+
 #[test]
 fn personal_u2_tip_config_follows_preference_switch() {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
