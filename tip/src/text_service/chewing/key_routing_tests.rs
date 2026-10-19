@@ -2,6 +2,7 @@
 
 use super::*;
 use chewing::d512::{D512Error, D512Mode, D512Options, SentenceRequest, SentenceScorer};
+use chewing::zhuyin::Bopomofo::{AI, D, TONE4};
 use std::sync::{
     Arc, Mutex,
     atomic::{AtomicU64, AtomicUsize},
@@ -910,6 +911,106 @@ fn calibration_fixture() -> (
         .unwrap();
     (s, t, rows)
 }
+
+fn calibration_multisyllable_keys(commit: bool) {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for mode in [D512Mode::Automatic, D512Mode::Suggestion] {
+        let (mut s, t, rows) = calibration_fixture();
+        s.cfg.chewing_tsf.d512_mode = if mode == D512Mode::Automatic { 1 } else { 2 };
+        s.cfg.chewing_tsf.esc_clean_all_buf = true;
+        s.cfg.save_reg();
+        s.cfg = Config::from_reg().unwrap();
+        s.chewing_editor = super::super::d512::tests::editor();
+        s.chewing_editor
+            .user_dict()
+            .insert(&[chewing::syl![D, AI, TONE4]], "帶");
+        s.chewing_editor.set_editor_options(|options| {
+            options.esc_clear_all_buffer = true;
+            options.disable_auto_learn_phrase = true;
+        });
+        s.chewing_editor
+            .set_sentence_scorer(
+                Some(
+                    s.calibration
+                        .track(Box::new(Scores(Arc::new(AtomicUsize::new(0))))),
+                ),
+                D512Options {
+                    mode,
+                    weight: 0.25,
+                    margin: 2.,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+        t.execute_sessions.set(true);
+        let ctx = t.cast().unwrap();
+        // Three synthetic syllables, through the actual Test/Key entry points.
+        for (index, syllable) in [b"294".as_slice(), b"1ul3", b"294"].iter().enumerate() {
+            for &ascii in *syllable {
+                let scan = match ascii {
+                    b'1' => 2,
+                    b'2' => 3,
+                    b'3' => 4,
+                    b'4' => 5,
+                    b'9' => 10,
+                    b'u' => 0x16,
+                    b'l' => 0x26,
+                    _ => unreachable!(),
+                };
+                let ev = event(ascii.to_ascii_uppercase() as u16, scan, ascii, 0);
+                assert!(s.on_test_keydown(&ctx, ev).unwrap());
+                assert!(s.on_keydown(&ctx, ev).unwrap());
+            }
+            assert!(
+                rows.borrow()
+                    .iter()
+                    .any(|r| r.phase == "rerank" && r.reading.len() == index + 1),
+                "missing syllable {}",
+                index + 1
+            );
+        }
+        let ids: Vec<_> = rows.borrow().iter().map(|r| r.id.clone()).collect();
+        assert!(ids.len() >= 3);
+        let committed = s.chewing_editor.display();
+        let ev = if commit {
+            event(VK_RETURN.0, 0x1c, 0, 0)
+        } else {
+            event(VK_ESCAPE.0, 1, 0, 0)
+        };
+        assert!(s.on_test_keydown(&ctx, ev).unwrap());
+        assert!(s.on_keydown(&ctx, ev).unwrap());
+        let rows = rows.borrow();
+        for id in &ids {
+            let ends: Vec<_> = rows
+                .iter()
+                .filter(|r| &r.id == id && r.phase != "rerank")
+                .collect();
+            assert_eq!(
+                ends.len(),
+                1,
+                "each rerank needs exactly one terminal receipt"
+            );
+            assert_eq!(ends[0].phase, if commit { "commit" } else { "cancel" });
+            assert_eq!(
+                ends[0].final_committed_text.as_deref(),
+                commit.then_some(committed.as_str())
+            );
+        }
+        assert!(s.chewing_editor.is_empty());
+    }
+}
+
+#[test]
+fn calibration_multisyllable_enter_finishes_every_rerank() {
+    calibration_multisyllable_keys(true);
+}
+
+#[test]
+fn calibration_multisyllable_escape_cancels_every_rerank() {
+    calibration_multisyllable_keys(false);
+}
+
 #[test]
 fn calibration_entry_redraw_then_escape_finishes_with_cancel() {
     let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());

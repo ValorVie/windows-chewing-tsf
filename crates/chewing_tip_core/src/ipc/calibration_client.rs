@@ -49,13 +49,25 @@ fn production_worker() -> Result<Worker, ()> {
         client
             .connect_for_scoring(Instant::now() + Duration::from_millis(100))
             .map_err(|_| ())?;
-        // The connection is nonblocking, each call is oneway and already bounded.
-        // A short/failed write discards this client; no partial-frame retry.
-        for call in calls {
-            client.send(call).map_err(|_| ())?;
-        }
-        Ok(())
+        send_calls(&client, calls)
     })
+}
+fn send_calls(client: &ChewingIpcClient, calls: Vec<MethodCall>) -> Result<(), ()> {
+    // Calibration has its own worker and connection. Wait for buffer space here:
+    // PIPE_NOWAIT + write_all can fail after the first terminal record, losing
+    // the rest of a commit/cancel batch. UI and scoring never wait on this worker.
+    client
+        .pipe
+        .try_borrow_mut()
+        .map_err(|_| ())?
+        .as_mut()
+        .ok_or(())?
+        .set_nonblocking(false)
+        .map_err(|_| ())?;
+    for call in calls {
+        client.send(call).map_err(|_| ())?;
+    }
+    Ok(())
 }
 struct Worker {
     sender: SyncSender<Vec<CalibrationRecord>>,
@@ -108,9 +120,83 @@ impl Worker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::{sync::mpsc, time::Duration};
+    use interprocess::os::windows::named_pipe::{
+        DuplexPipeStream, PipeListenerOptions, pipe_mode::Bytes,
+    };
+    use std::{
+        io::{BufRead, BufReader},
+        sync::mpsc,
+        time::Duration,
+    };
     fn record() -> CalibrationRecord {
         serde_json::from_str(r#"{"id":"synthetic","phase":"rerank","reading":["ㄐㄧㄚˇ"],"candidates":[{"text":"甲","raw":-1,"modelLogP":-2,"personalHits":0,"fused":-1.5}],"defaultIndex":0,"winnerIndex":0,"applied":false,"personalConflict":false,"pomConflict":false,"weight":0.25,"margin":0.5,"bonus":0,"mode":"automatic","suggested":false,"accepted":null,"finalCommittedText":null}"#).unwrap()
+    }
+    fn terminal_batch_with_slow_reader(phase: &str) {
+        let name = format!(
+            r"\\.\pipe\chewing-calibration-test-{}",
+            uuid::Uuid::new_v4()
+        );
+        let listener = PipeListenerOptions::new()
+            .path(name.as_str())
+            .create_duplex::<Bytes>()
+            .unwrap();
+        let (drain, gate) = mpsc::channel();
+        let server = std::thread::spawn(move || {
+            let mut reader = BufReader::new(listener.accept().unwrap());
+            // Hold the reader until send_calls returns or the bounded gate
+            // expires. Blocking writes must wait here; PIPE_NOWAIT loses frames.
+            let _ = gate.recv_timeout(Duration::from_millis(250));
+            let mut records = vec![];
+            loop {
+                let mut bytes = vec![];
+                if reader.read_until(0, &mut bytes).unwrap() == 0 {
+                    break;
+                }
+                if bytes.pop() != Some(0) {
+                    break; // A failed write can leave an incomplete final frame.
+                }
+                let call: MethodCall = serde_json::from_slice(&bytes).unwrap();
+                records.push(serde_json::from_value::<CalibrationRecord>(call.parameters).unwrap());
+            }
+            records
+        });
+        let pipe = DuplexPipeStream::connect_by_path(name.as_str()).unwrap();
+        pipe.set_nonblocking(true).unwrap(); // connect_for_scoring's initial mode
+        let client = ChewingIpcClient::new();
+        client.pipe.replace(Some(pipe));
+        let expected: Vec<_> = (0..32)
+            .map(|index| {
+                let mut row = record();
+                row.id = format!("synthetic-{index}");
+                row.phase = phase.into();
+                if index > 0 {
+                    // Still below MAX_FRAME_BYTES, but larger than the pipe buffer.
+                    row.candidates[0].text = "合".repeat(7000);
+                }
+                row.final_committed_text = (phase == "commit").then(|| "合成送出".into());
+                row
+            })
+            .collect();
+        let calls = expected
+            .iter()
+            .cloned()
+            .map(|r| r.into_call().unwrap())
+            .collect();
+        let result = send_calls(&client, calls);
+        let _ = drain.send(());
+        drop(client);
+        let actual = server.join().unwrap();
+        assert_eq!(actual.len(), expected.len(), "batch lost terminal records");
+        assert!(result.is_ok());
+        assert_eq!(actual, expected);
+    }
+    #[test]
+    fn calibration_commit_batch_survives_pipe_backpressure() {
+        terminal_batch_with_slow_reader("commit");
+    }
+    #[test]
+    fn calibration_cancel_batch_survives_pipe_backpressure() {
+        terminal_batch_with_slow_reader("cancel");
     }
     #[test]
     fn calibration_busy_sender_drops_without_waiting_or_retrying() {
