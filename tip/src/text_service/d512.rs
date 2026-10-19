@@ -36,6 +36,8 @@ fn configure_with(
         },
         weight,
         margin,
+        personal_bonus: cfg.d512_personal_bonus,
+        suggestion_personal_bonus: cfg.d512_suggest_personal_bonus,
         ..D512Options::default()
     };
     let scorer = if enabled { Some(factory()) } else { None };
@@ -214,6 +216,46 @@ pub(super) mod tests {
         .unwrap();
         editor.set_d512_context("前文");
         calls
+    }
+    #[test]
+    fn personal_u2_d512_uses_both_configured_bonuses_and_disabled_zeroes_hits() {
+        for (mode, expected) in [(1, 3.5), (2, 4.25)] {
+            let mut e = editor();
+            e.set_editor_options(|o| {
+                o.personal_candidate_preference = true;
+                o.phrase_choice_rearward = true;
+                o.disable_auto_learn_phrase = true;
+            });
+            type_reading(&mut e);
+            e.start_selecting().unwrap();
+            let index = e
+                .all_candidates()
+                .unwrap()
+                .iter()
+                .position(|s| s == "代錶")
+                .unwrap();
+            e.select(index).unwrap();
+            e.commit().unwrap();
+            e.confirm_personal_candidate_commit(true);
+            e.ack();
+            let cfg = ChewingTsfConfig {
+                d512_mode: mode,
+                d512_personal_bonus: 3.5,
+                d512_suggest_personal_bonus: 4.25,
+                ..Default::default()
+            };
+            configure(&mut e, &cfg, None, false);
+            type_reading(&mut e);
+            let _ = e.display();
+            let data = e.d512_calibration().unwrap();
+            assert_eq!(data.bonus, expected);
+            assert!(data.candidates.iter().any(|c| c.personal_hits > 0));
+            e.set_editor_options(|o| o.personal_candidate_preference = false);
+            let _ = e.display();
+            let data = e.d512_calibration().unwrap();
+            assert_eq!(data.bonus, 0.);
+            assert!(data.candidates.iter().all(|c| c.personal_hits == 0));
+        }
     }
     #[test]
     fn d512_off_does_not_construct_or_call_a_transport() {

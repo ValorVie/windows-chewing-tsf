@@ -106,7 +106,7 @@ impl Collector {
                     text: c.text,
                     raw: c.raw,
                     model_log_p: c.model_logp,
-                    personal_hits: 0,
+                    personal_hits: c.personal_hits as i64,
                     fused: c.fused,
                 })
                 .collect(),
@@ -117,7 +117,7 @@ impl Collector {
             pom_conflict: false,
             weight: data.weight,
             margin: data.margin,
-            bonus: 0.,
+            bonus: data.bonus,
             mode: mode.into(),
             suggested: data.suggested,
             accepted,
@@ -339,6 +339,24 @@ mod tests {
         let debug = format!("{call:?}");
         assert!(!debug.contains("代表"));
         assert!(!debug.contains("代錶"));
+    }
+
+    #[test]
+    fn personal_u2_collector_maps_engine_hits_and_bonus_through_commit() {
+        let (c, rows) = setup(1, 1);
+        let mut data = sample(1, false);
+        data.bonus = 3.5;
+        data.candidates[0].personal_hits = 2;
+        c.capture_with(1, || Some(data));
+        c.take_commit().confirm("合成送出");
+        let rows = rows.borrow();
+        assert_eq!(rows.len(), 2);
+        for row in rows.iter() {
+            assert_eq!(row.bonus, 3.5);
+            assert_eq!(row.candidates[0].personal_hits, 2);
+            assert!(!row.personal_conflict && !row.pom_conflict);
+            assert!(row.clone().into_call().is_ok());
+        }
     }
 
     #[test]

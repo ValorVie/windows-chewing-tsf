@@ -254,41 +254,46 @@ fn build_editor_from_cfg(cfg: &ChewingTsfConfig) -> Result<Editor, TipError> {
         );
         let user_dict_path = user_path.join("chewing.dat");
         // Recreate editor to load latest user files
-        let mut editor = Editor::chewing(
+        let editor = Editor::chewing(
             Some(chewing_path),
             // NB: the current API requires a *file* path
             Some(user_dict_path.to_string_lossy().into_owned()),
         )?;
-        editor.set_editor_options(|opt| {
-            opt.easy_symbol_input = cfg.easy_symbols_with_shift || cfg.easy_symbols_with_shift_ctrl;
-            // NB: Historically the config was inverted
-            opt.user_phrase_add_dir = if cfg.add_phrase_forward {
-                UserPhraseAddDirection::Backward
-            } else {
-                UserPhraseAddDirection::Forward
-            };
-            opt.phrase_choice_rearward = cfg.phrase_choice_rearward;
-            opt.auto_shift_cursor = cfg.advance_after_selection;
-            opt.candidates_per_page = cfg.cand_per_page as usize;
-            opt.esc_clear_all_buffer = cfg.esc_clean_all_buf;
-            opt.ctrl_symbol_new_phonetic = cfg.ctrl_symbol_new_phonetic;
-            opt.cursor_wrap = cfg.cursor_wrap;
-            opt.space_is_select_key = cfg.show_cand_with_space_key;
-            opt.disable_auto_learn_phrase = !cfg.enable_auto_learn;
-            opt.enable_fullwidth_toggle_key = cfg.enable_fullwidth_toggle_key;
-            opt.sort_candidates_by_frequency = cfg.sort_candidates_by_frequency;
-            // FIXME
-            opt.conversion_engine = match cfg.conv_engine {
-                0 => ConversionEngineKind::SimpleEngine,
-                2 => ConversionEngineKind::FuzzyChewingEngine,
-                _ => ConversionEngineKind::ChewingEngine,
-            };
-        });
-        let kbtype = KeyboardLayoutCompat::try_from(cfg.keyboard_layout as u8)
-            .unwrap_or(KeyboardLayoutCompat::Default);
-        editor.set_syllable_editor(syl_editor_from_kbtype(kbtype));
-        Ok(editor)
+        Ok(configure_loaded_editor(cfg, editor))
     })
+}
+
+fn configure_loaded_editor(cfg: &ChewingTsfConfig, mut editor: Editor) -> Editor {
+    editor.set_editor_options(|opt| {
+        opt.easy_symbol_input = cfg.easy_symbols_with_shift || cfg.easy_symbols_with_shift_ctrl;
+        // NB: Historically the config was inverted
+        opt.user_phrase_add_dir = if cfg.add_phrase_forward {
+            UserPhraseAddDirection::Backward
+        } else {
+            UserPhraseAddDirection::Forward
+        };
+        opt.phrase_choice_rearward = cfg.phrase_choice_rearward;
+        opt.auto_shift_cursor = cfg.advance_after_selection;
+        opt.candidates_per_page = cfg.cand_per_page as usize;
+        opt.esc_clear_all_buffer = cfg.esc_clean_all_buf;
+        opt.ctrl_symbol_new_phonetic = cfg.ctrl_symbol_new_phonetic;
+        opt.cursor_wrap = cfg.cursor_wrap;
+        opt.space_is_select_key = cfg.show_cand_with_space_key;
+        opt.disable_auto_learn_phrase = !cfg.enable_auto_learn;
+        opt.personal_candidate_preference = cfg.use_personal_candidate_preference;
+        opt.enable_fullwidth_toggle_key = cfg.enable_fullwidth_toggle_key;
+        opt.sort_candidates_by_frequency = cfg.sort_candidates_by_frequency;
+        // FIXME
+        opt.conversion_engine = match cfg.conv_engine {
+            0 => ConversionEngineKind::SimpleEngine,
+            2 => ConversionEngineKind::FuzzyChewingEngine,
+            _ => ConversionEngineKind::ChewingEngine,
+        };
+    });
+    let kbtype = KeyboardLayoutCompat::try_from(cfg.keyboard_layout as u8)
+        .unwrap_or(KeyboardLayoutCompat::Default);
+    editor.set_syllable_editor(syl_editor_from_kbtype(kbtype));
+    editor
 }
 
 fn syl_editor_from_kbtype(kbtype: KeyboardLayoutCompat) -> Box<dyn SyllableEditor> {
@@ -353,3 +358,23 @@ impl PartialEq<LanguageMode> for TsfLangMode {
 }
 
 impl_context_error!(TipError);
+
+#[cfg(test)]
+mod personal_tests {
+    use super::*;
+    #[test]
+    fn personal_u2_host_editor_follows_personal_preference_switch() {
+        for enabled in [true, false] {
+            let cfg = ChewingTsfConfig {
+                use_personal_candidate_preference: enabled,
+                ..Default::default()
+            };
+            let editor =
+                configure_loaded_editor(&cfg, chewing::editor::EditorBuilder::new().build());
+            assert_eq!(
+                editor.editor_options().personal_candidate_preference,
+                enabled
+            );
+        }
+    }
+}

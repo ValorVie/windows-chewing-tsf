@@ -75,6 +75,8 @@ struct Tsf {
     readonly: Cell<bool>,
     edits: Cell<u32>,
     execute_sessions: Cell<bool>,
+    defer_sessions: Cell<bool>,
+    queued_sessions: RefCell<Vec<ITfEditSession>>,
     document: Rc<Document>,
 }
 
@@ -87,6 +89,10 @@ impl ITfContext_Impl for Tsf_Impl {
         dwflags: TF_CONTEXT_EDIT_CONTEXT_FLAGS,
     ) -> windows_core::Result<windows_core::HRESULT> {
         self.edits.set(self.edits.get() + 1);
+        if self.defer_sessions.get() && dwflags.0 & TF_ES_ASYNC.0 != 0 {
+            self.queued_sessions.borrow_mut().push(pes.ok()?.clone());
+            return Ok(windows_core::HRESULT(0x00040300)); // TF_S_ASYNC: scheduled only
+        }
         if self.execute_sessions.get() {
             return Ok(match unsafe { pes.ok()?.DoEditSession(0) } {
                 Ok(()) => windows_core::HRESULT(0),
@@ -150,6 +156,9 @@ impl ITfComposition_Impl for Tsf_Impl {
         _ecwrite: u32,
         _range: windows_core::Ref<ITfRange>,
     ) -> windows_core::Result<()> {
+        if self.document.fail_commit.get() {
+            return Err(E_FAIL.into());
+        }
         self.document.committed.set(true);
         Ok(())
     }
@@ -240,6 +249,8 @@ struct Document {
     fail_write: Cell<bool>,
     committed: Cell<bool>,
     shifted: Cell<i32>,
+    shift_limit: Cell<Option<i32>>,
+    fail_commit: Cell<bool>,
 }
 #[implement(ITfRange)]
 struct Range {
@@ -269,6 +280,11 @@ impl ITfRange_Impl for Range_Impl {
         moved: *mut i32,
         _halt: *const TF_HALTCOND,
     ) -> windows_core::Result<()> {
+        let count = self
+            .document
+            .shift_limit
+            .get()
+            .map_or(count, |limit| count.min(limit));
         self.document.shifted.set(count);
         unsafe {
             *moved = count;
@@ -346,6 +362,8 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
         readonly: Cell::new(false),
         edits: Cell::new(0),
         execute_sessions: Cell::new(false),
+        defer_sessions: Cell::new(false),
+        queued_sessions: RefCell::new(vec![]),
         document: Rc::new(Document::default()),
     }
     .into_object();
@@ -369,6 +387,7 @@ fn fixture(mode: i32, key: i32) -> (ChewingTextService, ComObject<Tsf>, Arc<Atom
     };
     let mut cfg = Config::default();
     cfg.chewing_tsf.d512_mode = mode;
+    cfg.chewing_tsf.use_personal_candidate_preference = false;
     cfg.chewing_tsf.d512_suggestion_accept_key = key;
     cfg.chewing_tsf.show_notification = false;
     cfg.chewing_tsf.enable_caps_lock = false;
@@ -1204,4 +1223,302 @@ fn enter_entry_reuses_displayed_result_when_scorer_becomes_unavailable() {
         ("代錶".to_owned(), 1),
         "Enter changed displayed output or rescored"
     );
+}
+
+fn personal_u2_fixture() -> (ChewingTextService, ComObject<Tsf>) {
+    let (mut s, t, _) = fixture(0, 0);
+    s.cfg.chewing_tsf.use_personal_candidate_preference = true;
+    s.cfg.chewing_tsf.enable_auto_learn = false;
+    s.cfg.save_reg();
+    s.cfg = Config::from_reg().unwrap();
+    s.chewing_editor = super::super::d512::tests::editor();
+    s.chewing_editor.set_editor_options(|o| {
+        o.personal_candidate_preference = true;
+        o.phrase_choice_rearward = true;
+        o.disable_auto_learn_phrase = true;
+    });
+    super::super::d512::tests::type_reading(&mut s.chewing_editor);
+    s.chewing_editor.start_selecting().unwrap();
+    let index = s
+        .chewing_editor
+        .all_candidates()
+        .unwrap()
+        .iter()
+        .position(|s| s == "代錶")
+        .unwrap();
+    s.chewing_editor.select(index).unwrap();
+    assert_eq!(s.chewing_editor.display(), "代錶");
+    (s, t)
+}
+fn personal_u2_assert_learned(s: &mut ChewingTextService, learned: bool) {
+    s.chewing_editor.clear();
+    super::super::d512::tests::type_reading(&mut s.chewing_editor);
+    assert_eq!(
+        s.chewing_editor.display(),
+        if learned { "代錶" } else { "代表" }
+    );
+}
+fn personal_u2_drain(t: &ComObject<Tsf>) {
+    let sessions = std::mem::take(&mut *t.queued_sessions.borrow_mut());
+    for session in sessions {
+        let _ = unsafe { session.DoEditSession(0) };
+    }
+}
+#[test]
+fn personal_u2_tip_config_follows_preference_switch() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (s, _, _) = fixture(0, 0);
+    for enabled in [true, false] {
+        let cfg = ChewingTsfConfig {
+            d512_mode: 0,
+            use_personal_candidate_preference: enabled,
+            ..Default::default()
+        };
+        let e = s
+            .configure_loaded_editor(&cfg, super::super::d512::tests::editor())
+            .unwrap();
+        assert_eq!(e.editor_options().personal_candidate_preference, enabled);
+    }
+}
+#[test]
+fn personal_u2_enter_learns_only_after_actual_deferred_insertion() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t) = personal_u2_fixture();
+    t.defer_sessions.set(true);
+    let ctx = t.cast().unwrap();
+    assert!(s.on_keydown(&ctx, event(VK_RETURN.0, 0x1c, 0, 0)).unwrap());
+    assert!(!t.document.committed.get());
+    personal_u2_assert_learned(&mut s, false);
+    personal_u2_drain(&t);
+    assert!(t.document.committed.get());
+    assert_eq!(t.document.text.borrow().as_str(), "代錶");
+    personal_u2_assert_learned(&mut s, true);
+}
+#[test]
+fn personal_u2_immediate_callback_learns_despite_later_selection_failure() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t) = personal_u2_fixture();
+    t.execute_sessions.set(true);
+    s.chewing_editor.commit().unwrap();
+    let text = s.chewing_editor.display_commit().to_owned();
+    s.insert_text(&t.cast().unwrap(), &text).unwrap();
+    assert_eq!(t.document.text.borrow().as_str(), text);
+    personal_u2_assert_learned(&mut s, true);
+}
+#[test]
+fn personal_u2_composition_wrapper_preserves_receipt_before_ack() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t) = personal_u2_fixture();
+    t.execute_sessions.set(true);
+    s.chewing_editor.commit().unwrap();
+    let text = s.chewing_editor.display_commit().to_owned();
+    s.set_composition_string(&t.cast().unwrap(), &text, "", vec![], 0)
+        .unwrap();
+    assert!(t.document.committed.get());
+    personal_u2_assert_learned(&mut s, true);
+}
+#[test]
+fn personal_u2_scheduled_but_failed_partial_or_missing_client_never_learns() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for failure in 0..4 {
+        let (mut s, t) = personal_u2_fixture();
+        t.defer_sessions.set(true);
+        // Enter transfers this cell to EndComposition and replaces the service's
+        // cell. Invalidate the one retained by the queued edit sessions.
+        let composition = s.composition.clone();
+        assert!(
+            s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+                .unwrap()
+        );
+        match failure {
+            0 => t.document.fail_write.set(true),
+            1 => t.document.shift_limit.set(Some(1)),
+            2 => t.document.fail_commit.set(true),
+            _ => {
+                composition.replace(None);
+            }
+        }
+        personal_u2_drain(&t);
+        personal_u2_assert_learned(&mut s, false);
+    }
+}
+#[test]
+fn personal_u2_rejected_schedule_and_changed_output_never_learn() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    for changed in [false, true] {
+        let (mut s, t) = personal_u2_fixture();
+        t.execute_sessions.set(changed);
+        s.chewing_editor.commit().unwrap();
+        let mut text = s.chewing_editor.display_commit().to_owned();
+        if changed {
+            text.push('。');
+        }
+        s.insert_text(&t.cast().unwrap(), &text).unwrap();
+        personal_u2_assert_learned(&mut s, false);
+    }
+    let (mut s, t) = personal_u2_fixture();
+    t.execute_sessions.set(true);
+    s.output_simp_chinese = true;
+    assert!(
+        s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+            .unwrap()
+    );
+    assert_ne!(t.document.text.borrow().as_str(), "代錶");
+    personal_u2_assert_learned(&mut s, false);
+}
+#[test]
+fn personal_u2_disabled_and_torn_down_editors_discard_late_callbacks() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t) = personal_u2_fixture();
+    t.defer_sessions.set(true);
+    assert!(
+        s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+            .unwrap()
+    );
+    s.chewing_editor
+        .set_editor_options(|o| o.personal_candidate_preference = false);
+    personal_u2_drain(&t);
+    s.chewing_editor
+        .set_editor_options(|o| o.personal_candidate_preference = true);
+    personal_u2_assert_learned(&mut s, false);
+    let (mut s, t) = personal_u2_fixture();
+    t.defer_sessions.set(true);
+    assert!(
+        s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+            .unwrap()
+    );
+    drop(s); // The callbacks retain receipts, never the Editor/store owner.
+    personal_u2_drain(&t);
+    assert!(t.queued_sessions.borrow().is_empty());
+}
+
+#[test]
+fn personal_u2_overflow_confirms_prefix_while_tail_stays_composing() {
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t) = personal_u2_fixture();
+    t.execute_sessions.set(true);
+    s.chewing_editor
+        .set_editor_options(|o| o.auto_commit_threshold = 2);
+    for &key in b"294" {
+        s.chewing_editor
+            .process_keyevent(chewing::input::keymap::map_ascii(
+                &chewing::input::keymap::QWERTY_MAP,
+                key,
+            ));
+    }
+    let prefix = s.chewing_editor.display_commit().to_owned();
+    assert_eq!(prefix, "代錶");
+    assert!(!s.chewing_editor.is_empty());
+    s.update_preedit(&t.cast().unwrap(), prefix).unwrap();
+    assert!(t.document.committed.get());
+    personal_u2_assert_learned(&mut s, true);
+}
+#[test]
+fn personal_u2_accepted_suggestion_learns_changed_word_after_insertion_only() {
+    use super::super::{
+        d512::AcceptanceGesture,
+        d512_ui::{AcceptanceResult, DocumentSnapshot, dispatch_acceptance},
+    };
+    let _guard = REGISTRY_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+    let _registry = Registry::new();
+    let (mut s, t, _) = fixture(2, 0);
+    s.cfg.chewing_tsf.use_personal_candidate_preference = true;
+    s.cfg.save_reg();
+    s.cfg = Config::from_reg().unwrap();
+    let mut e = chewing::editor::EditorBuilder::new().build();
+    for word in ["代", "帶"] {
+        e.user_dict().insert(&[chewing::syl![D, AI, TONE4]], word);
+    }
+    for word in ["表", "錶"] {
+        e.user_dict().insert(
+            &[chewing::syl![
+                chewing::zhuyin::Bopomofo::B,
+                chewing::zhuyin::Bopomofo::I,
+                chewing::zhuyin::Bopomofo::AU,
+                chewing::zhuyin::Bopomofo::TONE3
+            ]],
+            word,
+        );
+    }
+    e.user_dict().boost(&[chewing::syl![D, AI, TONE4]], "代");
+    e.user_dict().boost(
+        &[chewing::syl![
+            chewing::zhuyin::Bopomofo::B,
+            chewing::zhuyin::Bopomofo::I,
+            chewing::zhuyin::Bopomofo::AU,
+            chewing::zhuyin::Bopomofo::TONE3
+        ]],
+        "表",
+    );
+    e.set_editor_options(|o| {
+        o.personal_candidate_preference = true;
+        o.disable_auto_learn_phrase = true;
+    });
+    e.set_sentence_scorer(
+        Some(Box::new(Scores(Arc::new(AtomicUsize::new(0))))),
+        D512Options {
+            mode: D512Mode::Suggestion,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    super::super::d512::tests::type_reading(&mut e);
+    assert_eq!(e.display(), "代表");
+    let proposal = e.d512_report().unwrap().suggestion.unwrap();
+    assert_eq!(proposal.changes.len(), 1);
+    assert_eq!(proposal.changes[0].text, "錶");
+    let document = DocumentSnapshot {
+        preedit: "代表".into(),
+        confirmed: String::new(),
+        cursor: 2,
+    };
+    assert_eq!(
+        dispatch_acceptance(
+            &mut e,
+            AcceptanceGesture::Dedicated,
+            Some((&document, &proposal)),
+            Some(&document),
+            true
+        ),
+        AcceptanceResult::Accepted
+    );
+    s.chewing_editor = e;
+    t.defer_sessions.set(true);
+    assert!(
+        s.on_keydown(&t.cast().unwrap(), event(VK_RETURN.0, 0x1c, 0, 0))
+            .unwrap()
+    );
+    assert!(!t.document.committed.get());
+    personal_u2_drain(&t);
+    assert!(t.document.committed.get());
+    // Use public engine calibration to inspect learned intervals, without
+    // exposing a test-only store API or touching personal files.
+    for (keys, word, hits) in [(b"294".as_slice(), "代", 0), (b"1ul3".as_slice(), "錶", 1)] {
+        s.chewing_editor.clear();
+        for &key in keys {
+            s.chewing_editor
+                .process_keyevent(chewing::input::keymap::map_ascii(
+                    &chewing::input::keymap::QWERTY_MAP,
+                    key,
+                ));
+        }
+        let _ = s.chewing_editor.display();
+        let data = s.chewing_editor.d512_calibration().unwrap();
+        assert_eq!(
+            data.candidates
+                .iter()
+                .find(|c| c.text == word)
+                .unwrap()
+                .personal_hits,
+            hits
+        );
+    }
 }

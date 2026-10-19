@@ -175,6 +175,19 @@ pub(crate) mod tests {
     pub(crate) fn always_enabled(path: PathBuf) -> CalibrationLog {
         CalibrationLog::with_sources(|| true, move || Ok(path.clone()))
     }
+    #[test]
+    fn personal_u2_host_writes_personal_calibration_values_unchanged() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        let temp = TempDir::new();
+        let logger = always_enabled(temp.0.clone());
+        let mut row = records().remove(0);
+        row.bonus = 3.5;
+        row.candidates[0].personal_hits = 2;
+        logger.record_call(row.clone().into_call().unwrap());
+        let actual: CalibrationRecord =
+            serde_json::from_slice(&fs::read(temp.0.join("calibration.jsonl")).unwrap()).unwrap();
+        assert_eq!(actual, row);
+    }
     fn log_at(path: PathBuf) -> CalibrationLog {
         CalibrationLog::with_sources(enabled_from_registry, move || Ok(path.clone()))
     }

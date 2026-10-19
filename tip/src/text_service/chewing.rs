@@ -151,6 +151,9 @@ pub(super) struct CompositionString {
     pub(super) on_committed: Option<Rc<dyn Fn()>>,
 }
 
+// Owned receipts stay on the editor thread through the actual TSF write.
+type CommitConfirmation = Rc<dyn Fn(&str)>;
+
 pub(super) struct ChewingTextService {
     thread_mgr: ITfThreadMgr,
     tid: u32,
@@ -780,7 +783,6 @@ impl ChewingTextService {
             && (last_behavior == EditorKeyBehavior::Commit || text_action.is_some())
         {
             let mut text = self.chewing_editor.display_commit().to_owned();
-            self.chewing_editor.ack();
             debug!(text; "commit string");
             if let Some(param) = text_action {
                 text.push_str(&param);
@@ -798,7 +800,6 @@ impl ChewingTextService {
 
         let commit = if last_behavior == EditorKeyBehavior::Commit {
             let mut commit = self.chewing_editor.display_commit().to_owned();
-            self.chewing_editor.ack();
             if let Some(param) = text_action {
                 commit.push_str(&param);
             }
@@ -981,7 +982,6 @@ impl ChewingTextService {
             if self.is_composing() && self.lang_mode.get().is_disabled() {
                 self.chewing_editor.commit()?;
                 let commit = self.chewing_editor.display_commit().to_owned();
-                self.chewing_editor.ack();
                 debug!(commit; "commit string");
                 unsafe {
                     let doc_mgr = self
@@ -1075,7 +1075,7 @@ impl ChewingTextService {
     fn update_preedit(&mut self, context: &ITfContext, commit: String) -> Result<()> {
         // Detach receipts for the committed prefix before decoding the remaining
         // preedit, whose scoring belongs to the next commit (Mac takeCommitRecords).
-        let receipt = (!commit.is_empty()).then(|| self.calibration.take_commit());
+        let receipt = (!commit.is_empty()).then(|| self.take_commit_confirmation());
         let mut composition_buf = String::new();
         let mut segments = vec![];
         let cursor = self.chewing_editor.cursor();
@@ -1147,17 +1147,13 @@ impl ChewingTextService {
         Ok(())
     }
 
-    fn insert_text(&self, context: &ITfContext, text: &str) -> Result<()> {
+    fn insert_text(&mut self, context: &ITfContext, text: &str) -> Result<()> {
         debug!(text; "going to request immediate text insertion");
         let htext = text.into();
-        let receipt = self.calibration.take_commit();
+        let receipt = self.take_commit_confirmation();
         let committed = text.to_owned();
-        let session = InsertText::new(
-            context.clone(),
-            htext,
-            Rc::new(move || receipt.confirm(&committed)),
-        )
-        .into_object();
+        let session = InsertText::new(context.clone(), htext, Rc::new(move || receipt(&committed)))
+            .into_object();
         request_edit_session(
             context,
             self.tid,
@@ -1165,6 +1161,22 @@ impl ChewingTextService {
             TF_ES_ASYNC | TF_ES_READWRITE,
         );
         Ok(())
+    }
+
+    fn take_commit_confirmation(&mut self) -> CommitConfirmation {
+        let original = self.chewing_editor.display_commit().to_owned();
+        let personal = RefCell::new(self.chewing_editor.take_personal_candidate_commit());
+        let calibration = self.calibration.take_commit();
+        // ack() discards an undetached personal receipt. Detach before it and
+        // before rendering the next preedit or processing another key.
+        self.chewing_editor.ack();
+        Rc::new(move |inserted| {
+            calibration.confirm(inserted);
+            let receipt = personal.borrow_mut().take();
+            if let Some(receipt) = receipt {
+                receipt.confirm(inserted == original);
+            }
+        })
     }
 
     fn end_composition(&mut self, context: &ITfContext) -> Result<()> {
@@ -1190,7 +1202,7 @@ impl ChewingTextService {
         segments: Vec<(usize, usize)>,
         cursor: usize,
     ) -> Result<()> {
-        let receipt = (!commit.is_empty()).then(|| self.calibration.take_commit());
+        let receipt = (!commit.is_empty()).then(|| self.take_commit_confirmation());
         self.set_composition_with_receipt(context, commit, preedit, segments, cursor, receipt)
     }
 
@@ -1201,7 +1213,7 @@ impl ChewingTextService {
         preedit: &str,
         segments: Vec<(usize, usize)>,
         cursor: usize,
-        receipt: Option<Rc<super::d512_calibration::CommitReceipt>>,
+        receipt: Option<CommitConfirmation>,
     ) -> Result<()> {
         debug!(commit, preedit; "set composition string");
         let commit: String = if self.output_simp_chinese {
@@ -1217,7 +1229,7 @@ impl ChewingTextService {
         let on_applied = self.d512_publication(context, &preedit, cursor);
         let on_committed = receipt.map(|receipt| {
             let committed = commit.clone();
-            Rc::new(move || receipt.confirm(&committed)) as Rc<dyn Fn()>
+            Rc::new(move || receipt(&committed)) as Rc<dyn Fn()>
         });
         if let Some(cell) = self.pending_edit.upgrade() {
             debug!(cursor, preedit:%; "Reuse existing edit session");
@@ -1679,6 +1691,7 @@ impl ChewingTextService {
             opt.cursor_wrap = cfg.cursor_wrap;
             opt.space_is_select_key = cfg.show_cand_with_space_key;
             opt.disable_auto_learn_phrase = !cfg.enable_auto_learn;
+            opt.personal_candidate_preference = cfg.use_personal_candidate_preference;
             opt.enable_fullwidth_toggle_key = cfg.enable_fullwidth_toggle_key;
             opt.sort_candidates_by_frequency = cfg.sort_candidates_by_frequency;
             opt.conversion_engine = match cfg.conv_engine {

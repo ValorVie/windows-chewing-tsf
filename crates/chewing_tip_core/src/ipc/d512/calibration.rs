@@ -55,12 +55,13 @@ impl CalibrationRecord {
             || !index_valid(self.winner_index)
             || !self.weight.is_finite() || self.weight < 0.
             || !self.margin.is_finite() || self.margin < 0.
-            || self.bonus != 0. || self.personal_conflict || self.pom_conflict
+            || !self.bonus.is_finite() || self.bonus < 0.
+            || self.personal_conflict || self.pom_conflict
             || self.candidates.iter().any(|candidate| {
                 !candidate.raw.is_finite()
                     || candidate.model_log_p.is_some_and(|value| !value.is_finite())
                     || candidate.fused.is_some_and(|value| !value.is_finite())
-                    || candidate.personal_hits != 0
+                    || candidate.personal_hits < 0
             })
         {
             return Err(CalibrationError::InvalidRecord);
@@ -214,13 +215,32 @@ mod tests {
                 2 => invalid.candidates[0].fused = Some(f64::NAN),
                 3 => invalid.weight = f64::NEG_INFINITY,
                 4 => invalid.margin = -1.0,
-                5 => invalid.bonus = 1.0,
-                6 => invalid.candidates[0].personal_hits = 1,
+                5 => invalid.bonus = f64::NAN,
+                6 => invalid.candidates[0].personal_hits = -1,
                 7 => invalid.personal_conflict = true,
                 8 => invalid.pom_conflict = true,
                 _ => invalid.winner_index = 1,
             }
             assert_eq!(invalid.validate(), Err(CalibrationError::InvalidRecord));
+        }
+    }
+    #[test]
+    fn personal_u2_calibration_preserves_bonus_and_hits_and_rejects_invalid_bonus() {
+        let mut input = record();
+        input.bonus = 3.5;
+        input.candidates[0].personal_hits = 2;
+        let call = input.clone().into_call().unwrap();
+        assert_eq!(
+            serde_json::from_value::<CalibrationRecord>(call.parameters).unwrap(),
+            input
+        );
+        assert_eq!(
+            serde_json::from_slice::<CalibrationRecord>(&input.to_json_line().unwrap()).unwrap(),
+            input
+        );
+        for bonus in [-0.01, f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            input.bonus = bonus;
+            assert_eq!(input.validate(), Err(CalibrationError::InvalidRecord));
         }
     }
     #[test]

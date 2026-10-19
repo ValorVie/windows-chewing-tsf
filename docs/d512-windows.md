@@ -9,10 +9,11 @@ features in a workspace build.
 Each scoring call has the engine's deadline (100 ms by default). A bounded
 background worker isolates synchronous server attestation. Pipe connection,
 write and read operations have deadlines and a 64 KiB frame limit. Errors,
-busy state and late replies preserve the engine's complete native order. Host
+busy state and late replies preserve the engine's current default, including
+enabled personal preferences. Host
 launches are throttled to one attempt per 30 seconds, with no scoring retry.
 Mode 0 creates no IPC scorer and makes no connection or launch attempt. Mode 2
-keeps native text and shows a separate suggestion. Acceptance calls the
+keeps the engine default and shows a separate suggestion. Acceptance calls the
 engine's atomic suggestion API and leaves composition active without committing.
 Automatic parameters use `D512Weight` / `D512Margin`; suggestion parameters use
 `D512SuggestWeight` / `D512SuggestMargin`. Both pairs are decimal strings, with
@@ -27,6 +28,24 @@ defaults, remain unchanged when loaded or saved with unrelated settings.
 
 The margins follow the Mac presets by product decision; they are not the
 libchewing calibration points. Weight is 0.25 for all six presets.
+
+`UsePersonalCandidatePreference` is a DWORD, enabled by default. It controls
+`EditorOptions::personal_candidate_preference`. `D512PersonalBonus` and
+`D512SuggestPersonalBonus` are decimal strings for the automatic and suggestion
+bonuses. Both default to 2; missing, invalid, nonfinite or negative values use
+that default. Presets do not change these bonuses. Turning the switch off keeps
+saved preferences and makes the engine's effective personal hits and bonus zero.
+
+Manual selection and suggestion acceptance do not learn until the exact commit
+text reaches the client. The TIP detaches the engine's owned receipt before
+`ack()` and keeps it on the editor thread through the edit session. Successful
+insertion confirms it; failed, missing or replaced writes reject it. Simplified
+conversion or added output text rejects learning when it changes the original
+commit. A composition prefix also needs its full UTF-16 range shift to succeed.
+Turning the preference off revokes pending learning; callbacks after editor
+teardown discard their receipts without keeping the store alive. See the
+engine's [personal preference contract](https://github.com/ValorVie/libchewing/blob/4e8cfd000fac3b5d0ac75630b92a8e5e3407c158/docs/personal-candidate-preference.md)
+for storage, candidate ordering and lifecycle flush limits.
 
 `D512LogCalibration` is a DWORD (0 off by default, 1 on), stored unchanged in
 `ChewingTsfConfig::d512_log_calibration`. The TIP collects only when D512 is on
@@ -56,7 +75,8 @@ turning collection off discards pending and detached receipts.
 
 The host accepts complete records via `im.chewing.d512.CalibrationLog` with
 `oneway=true`. A separate background worker performs connection, attestation,
-serialization and nonblocking pipe writes. The UI only tries a bounded handoff.
+serialization and pipe writes. This worker waits for pipe buffer space so a
+commit/cancel batch can outlive brief reader delays. The UI only tries a bounded handoff.
 Busy senders and records exceeding the 64 KiB frame limit are dropped without
 retry. Calibration transport failure does not delay the scoring worker.
 
@@ -75,8 +95,10 @@ It does not use its installation or working directory for records. The launcher'
 cleared environment and `ORT_DISABLE_TELEMETRY=1` remain unchanged.
 
 Fields match the Mac calibration record, including explicit null `modelLogP`
-and `fused` values when scores are unavailable. Windows emits zero personal
-hits/bonus and false personal/POM conflicts. Mac's actual wire modes are
+and `fused` values when scores are unavailable. Windows copies each candidate's
+`personal_hits` and the active `bonus` from the engine. The engine supplies zeros
+when its personal preference switch is off. Personal/POM conflict flags remain
+false. Mac's actual wire modes are
 `automatic` and `suggest`. The analysis script accepts both these modes and
 legacy automatic records whose mode is null. Scores from failed or timed-out
 attempts remain null, so they cannot be used as scored calibration examples.

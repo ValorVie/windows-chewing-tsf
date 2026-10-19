@@ -157,7 +157,9 @@ impl ITfEditSession_Impl for SetCompositionString_Impl {
                     composition.ShiftStart(ec, &range)?;
                     // The prefix is now outside the composition. Later attribute or
                     // selection failures must not relabel this committed text cancel.
-                    committed = pending.on_committed.clone();
+                    if moved == pending.commit.encode_utf16().count() as i32 {
+                        committed = pending.on_committed.clone();
+                    }
                     let disp_attr_prop = self.context.GetProperty(&GUID_PROP_ATTRIBUTE)?;
                     let mut atoms = self.da_atom.iter().cycle();
                     for seg in &pending.segments {
